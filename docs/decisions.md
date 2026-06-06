@@ -1,0 +1,273 @@
+# 決策日誌 (Decision Log)
+
+本檔記錄所有偏離 `docs/` 中 `DECIDED` 項目的提案與裁決。
+
+## 使用時機
+
+當實作過程中發現某個 `DECIDED` 項目在實務上不可行、有更好替代方案、或需要小幅修正時：
+
+1. **不要直接修改 `docs/`**
+2. **不要在 PR 中夾帶設計變更**
+3. **先在此檔新增提案**，狀態為 `PROPOSED`
+4. 待 reviewer 將狀態改為 `APPROVED` 或 `REJECTED` 後，才能在 PR 中實作對應變更
+5. APPROVED 後同時更新 `docs/` 相關章節
+
+## 格式
+
+每個提案使用以下結構：
+
+```
+## DL-NNN: 簡短標題
+
+- **狀態**：PROPOSED / APPROVED / REJECTED / SUPERSEDED
+- **提案者**：（名字或 agent id）
+- **日期**：YYYY-MM-DD
+- **影響檔案**：docs/0X-xxx.md §X.Y
+- **裁決者**：（待填）
+- **裁決日期**：（待填）
+
+### 背景
+（當前 DECIDED 項目是什麼，為何要改）
+
+### 提案
+（具體要改成什麼）
+
+### 替代方案
+（其他考慮過的選項，為何不選）
+
+### 影響評估
+- 工作量：
+- 相依模組：
+- 回退成本：
+
+### 裁決說明
+（reviewer 填寫）
+```
+
+---
+
+## DL-001: （範例佔位）
+
+- **狀態**：APPROVED
+- **提案者**：架構評審
+- **日期**：（初始設計階段）
+- **影響檔案**：docs/01 §1.5、docs/05 §5.3
+- **裁決者**：專案負責人
+
+### 背景
+原規劃使用 Azure OpenAI + Gemini 作為主備 vendor，理由是 FERPA / ZDR。
+
+### 提案
+改用 OpenAI 標準付費 API，主 `gpt-5.5` / 備 `gpt-5.4`。
+
+### 替代方案
+- Azure OpenAI：採購流程複雜、新模型上線晚
+- Anthropic Claude / Google Gemini：v1 暫不引入 vendor 級 fallback
+
+### 影響評估
+- 工作量：小（簡化環境變數與部署）
+- 相依模組：05、06、08
+- 回退成本：低（換 API key 即可）
+
+### 裁決說明
+v1 採此方案。教科書與學生查詢無 PHI，標準付費 API 之資料保留條款已足夠。
+
+---
+
+> 以下 DL-002～DL-006 為「11 份 docs 整併為 `ARCHITECTURE.md`」時發現的矛盾，使用者於 2026-06-07 委派 main Claude 逐項裁決並回寫 spec（「選擇最合理的方式進行」）。裁決者保留否決權。
+
+## DL-002: orchestrator 在單一連線上序列執行 Stage B 與 BM25
+
+- **狀態**：APPROVED　**提案者**：main Claude（委派）　**日期**：2026-06-07
+- **影響檔案**：ARCHITECTURE.md §4.7、§4.5、§1.6　**裁決者**：專案負責人（委派）
+
+### 背景
+原 §4.7 orchestrator 對單一 `conn` 跑 `asyncio.gather(stage_b_task, bm25_task)`，但同檔註明「用單一 conn」。asyncpg **禁止**在同一 connection 併發操作（會 raise `InterfaceError: another operation is in progress`）——線上檢索必崩（P0）。
+
+### 提案
+Stage B 與 BM25 改在同一 `conn` 上**序列** await（Stage B → BM25）。
+
+### 替代方案
+從 PgBouncer 池借第二條連線（`async with pool.acquire() as conn2`）給 BM25 以恢復並行——但每請求多佔一條連線，加重 transaction pooling 壓力。
+
+### 影響評估
+- 延遲：序列約 +50ms（Stage B <200ms + BM25 <50ms）；在 ~10k/月、低併發下可接受。
+- 回退成本：低（要並行隨時可借第二條連線）。
+
+---
+
+## DL-003: 量化精排升級走 INT8 rescore（優先）而非 float32
+
+- **狀態**：APPROVED　**提案者**：main Claude（委派）　**日期**：2026-06-07
+- **影響檔案**：ARCHITECTURE.md §2.4、§4.4、§4.6、§8.2　**裁決者**：專案負責人（委派）
+
+### 背景
+§2.4「MUST NOT 同存 float32 與 bit」與 §4.4/§4.6「Stage B 精度不足時改 float32（需另存）」直接衝突——升級路徑被自家 MUST NOT 堵死。
+
+### 提案
+v1 預設只存 bit。當 RAGAS `context_precision < 0.85` 且確認 binary 量化為瓶頸時，**MAY** 另存一份更高精度的 rescore 表示供 Stage B 精排，**優先 INT8**（相對 float32 省 4×、相對 binary 品質明顯回升），float32 為次選；啟用須經 RAGAS 與儲存評估。
+
+### 替代方案
+(a) 永遠只存 bit（精度不足時無路可走）；(b) 直接 float32（儲存 4× 於 INT8，CP 值差）。
+
+### 裁決說明
+binary 粗排 + INT8/float32-query rescore 為 2025–26 業界標準做法（HF embedding-quantization、Qdrant binary quantization + rescore、Vespa int8、HPC-ColPali）。
+
+---
+
+## DL-004: 語意快取 embedding 統一用 text-embedding-3-small
+
+- **狀態**：APPROVED　**提案者**：main Claude（委派）　**日期**：2026-06-07
+- **影響檔案**：ARCHITECTURE.md §6.4、附錄 A　**裁決者**：專案負責人（委派）
+
+### 背景
+§6.4 內文用 `text-embedding-3-small`，附錄 A 與技術棧用 `text-embedding-3-large`（疑 typo）。
+
+### 提案
+統一用 `text-embedding-3-small`。語意快取是「query 近似去重」（threshold 0.95），非檢索品質關鍵；small 已足夠，且較便宜（~5×）、維度 1536 < 3072（省 Redis 記憶體）。
+
+---
+
+## DL-005: metadata 增 optional `figures[]`；權威圖號靠 LLM 逐句引文
+
+- **狀態**：APPROVED　**提案者**：main Claude（委派）　**日期**：2026-06-07
+- **影響檔案**：ARCHITECTURE.md §3.2、§5.7　**裁決者**：專案負責人（委派）
+
+### 背景
+metadata MUST 欄位不含 `figure`，但 §5.4 引文格式與 §5.7 `PageCitation.figure = metadata.get("figure")` 都需圖號。
+
+### 提案
+metadata 增 optional `figures: string[]`（Docling 抽出的該頁圖說標籤清單，預設 `[]`），作為前端引用面板 hint。**權威圖號以 LLM 對高解析頁圖的逐句引文為準**（system prompt 已要求 `[書名, 頁碼, 圖號]`）；不靠 page-level metadata 鎖定單一圖（一頁常含多張圖）。`PageCitation.figure` 維持 optional，取 `figures` 首項作 hint。
+
+---
+
+## DL-006: 觀測埠分配 Next.js 3000 / Grafana 3001 / LangFuse 3100
+
+- **狀態**：APPROVED　**提案者**：main Claude（委派）　**日期**：2026-06-07
+- **影響檔案**：ARCHITECTURE.md §1.5、附錄 A　**裁決者**：專案負責人（委派）
+
+### 背景
+§1.5 服務拓撲將 LangFuse 與 Next.js 都標 `:3000`，同機/對外暴露會撞埠。
+
+### 提案
+容器內以 service name 定址本不撞，但對外/同機暴露時統一錯開：Next.js `:3000`、Grafana `:3001`、LangFuse `:3100`。
+
+---
+
+> DL-007、DL-008 為「英文語料 + 中英混合 query + 地端 docker/uv/npm + 要求未來不被迫 re-platform」前提下，使用者於 2026-06-07 委派 main Claude 決定（「你自行決定」）。裁決者保留否決權。
+
+## DL-007: DB 留單一 PostgreSQL；MaxSim 用 VectorChord（首選）/ 兩階段（fallback），拒絕 LanceDB
+
+- **狀態**：APPROVED（委派）　**提案者**：main Claude　**日期**：2026-06-07
+- **影響檔案**：ARCHITECTURE.md §4.1、§8.1、§8.2、§4.7　**裁決者**：專案負責人（委派）
+
+### 背景
+評估是否改用 LanceDB（embedded）以簡化部署 / 取得原生 ColPali MaxSim。使用者要求「不要先 LanceDB、未來又被迫整碗改 PostgreSQL」。
+
+### 提案
+留在 **PostgreSQL 作為單一 system of record**（向量 + 關聯 books/pages/metadata/query_logs + BM25 tsvector + ACID + kb_version 交易切換）。MaxSim 引擎藏在 §4.7 介面後，可互換：
+- **首選**：VectorChord 0.3 擴充——Postgres 內原生、高效 MaxSim（decomposed MaxSim，受 XTR-WARP 啟發），採用後可**省掉自建兩階段**；地端有 `tensorchord/vchord` docker image。**先做小 PoC 驗證再正式採用。**
+- **fallback**：應用層自建兩階段（pgvector binary HNSW 粗排 → MaxSim 精排），已具備。
+
+### 替代方案
+LanceDB（embedded）——**拒絕**。理由：它只解決向量端、不含關聯，最終仍需第二個 SQL store（雙 store）；multivector 目前僅 cosine、BM25 需另接；OSS（<50 QPS 單機）→ Enterprise（K8s）本身也是一次未來遷移。
+
+### 裁決說明
+本系統的決定因素是**資料模型需求（關聯 + 全文 + 分析：限流/抽檢/RAGAS/回饋/SSO），非 QPS**。即使永遠維持 <50 QPS 單機，這些需求都在 → 單一 Postgres 勝過「LanceDB + SQL」雙 store。VectorChord 讓 Postgres 取得 LanceDB 的主要技術優勢（原生 MaxSim）而**不離開 Postgres**，直接消除「未來被迫 re-platform」風險。回退成本低（PoC 失敗就用兩階段，皆 Postgres、皆在 §4.7 介面後）。
+
+---
+
+## DL-008: 中英混合 query → encoder 須跨語言實測；不預設 ColPali v1.3 安全
+
+- **狀態**：APPROVED（委派）　**提案者**：main Claude　**日期**：2026-06-07
+- **影響檔案**：ARCHITECTURE.md §8.2、§7.7　**裁決者**：專案負責人（委派）
+
+### 背景
+語料（教科書/講義）為英文，但學生 query 為**中英混合** → 「中文 query → 英文頁面」屬**跨語言檢索**。English-centric 視覺檢索 encoder（ColPali v1.3，PaliGemma 底）對中文 query 可能 recall 大降。注意：**頁面端**仍是英文嵌入，不需多語言「文件」模型；需要的是 **query 端**的跨語言處理。
+
+### 提案
+encoder 維持 OPEN，但**選型 gate 在「含中文 query 的黃金題庫」RAGAS 實測**（§7.7）。路徑：
+- **(a) ColPali v1.3 + 查詢翻譯**：偵測中文 query → MT 成英文再編碼。保留英文嵌入模型（符合「不需多語言嵌入」偏好），代價是多一個 MT 步驟與少量術語誤譯風險（解剖術語多為拉丁/英文，誤譯風險低）。**先測這條。**
+- **(b) 跨語言 late-interaction encoder**：ColQwen2.5-multilingual / ColNomic，免 MT 但需換模型並重建索引。(a) 不足再評。
+
+### 裁決說明
+BM25 副線對中文 query 幫助有限（tsvector 為英文）→ 中文 query 主要靠向量路徑，encoder 的跨語言品質更關鍵，故必須實測而非假設。
+
+---
+
+> DL-009～DL-013 來源：2026-06-07 對 `ARCHITECTURE.md` 做的雙模型 spec 審查——**Codex（跨模型隔離）** + **Claude Opus 4.8（同模型，狀態隔離）**，兩者獨立收斂於以下重點。使用者裁示「全部套用」。
+
+## DL-009: 成本路由——條件式附圖 + 小模型下放（解除「一律 high、固定 3 張」MUST）
+
+- **狀態**：APPROVED　**日期**：2026-06-07　**影響檔案**：ARCHITECTURE.md §5.5、§5.6、§1.9、§5.3、附錄 D
+
+### 背景
+兩模型一致認定：每次查詢固定送 3 張 `detail:high` 整頁圖（連純文字題也送）是**最大、且被 spec 自己 MUST 鎖死**的成本項；影像約占輸入 token 47%，對純文字題是純浪費。
+
+### 提案
+影像附帶改**條件式**，由 `page_type`（pure_text/figure_heavy/table/mixed）+ query intent 路由：
+- 純文字題 → 只送 `docling_md`，**不送圖**。
+- 圖譜題 → 只對 figure_heavy/mixed 頁送圖，**預設 top-1（最多 2）**，非固定 3。
+- `detail:"high"` 保留給「需判讀標籤」的圖頁；v2 評估 figure bbox 裁切（保標籤清晰又大砍 token）。
+- 影像存 web-optimized JPEG/WebP derivative，避免 inline base64 膨脹。
+- 小模型路由（§5.3 OPEN）正式列為成本槓桿：純文字/簡單題可下放較小模型（需 intent classifier + RAGAS）。
+
+把 §5.5「一律 high」「固定 3 張」、§1.9 將 `detail:low/auto` 列「陷阱」——由 MUST/硬禁降為 **default**，交給路由與 RAGAS 取捨。
+
+### 理由
+這是「隨 #使用者成長是否負擔得起」的決定性槓桿（1M/月規模可差 ~$5–9k/月），且對純文字題零品質影響。
+
+---
+
+## DL-010: 擴展性——VectorChord 為擴展正解；v1 不完整實作自建兩階段；page_patches 分區 + RAM sizing
+
+- **狀態**：APPROVED　**日期**：2026-06-07　**影響檔案**：ARCHITECTURE.md §3.3、§3.6、§4.1、§4.7、§4.8、附錄 D（補強 DL-007）
+
+### 背景
+兩模型一致：(1) `page_patches` 一 patch 一 row，含 tuple+PK overhead ≈ **~100 bytes/patch（~6× 原始）→ ~100MB/書**（非 16MB）；真正 cliff 是 Stage B 隨機讀需常駐 RAM。(2) v1 同時完整實作並測試「VectorChord + 自建兩階段」兩套是 gold-plating。
+
+### 提案
+- VectorChord（DL-007 首選）定位為**擴展正解**：其 decomposed/postings 儲存避開 row-per-patch 膨脹。**先做 PoC，通過即只實作它**；自建兩階段**保留 §4.7 介面、延後完整實作**（v1 不需 production-ready + 全測，§4.8 兩階段測試標注為 fallback 引擎用）。
+- 容量規劃寫死公式：**Postgres RAM ≥ 作用中版本 `page_patches` 大小**。
+- `page_patches` 按 `kb_version`（或 book）**分區**，利於刪除/備份/重建，並避免 blue-green 期間 HNSW 過濾撈不滿候選。
+- 備份：immutable patch 資料不做每日全量 `pg_dump`，改 snapshot + 可重現 ingest。
+
+---
+
+## DL-011: 裁減 v1 過度設計——Modal scale-to-zero + 觀測先 LangFuse+Sentry + 縮短 blue-green 雙版窗
+
+- **狀態**：APPROVED　**日期**：2026-06-07　**影響檔案**：ARCHITECTURE.md §6.2、§6.5、§6.6、§5.1
+
+### 背景
+兩模型一致指出與規模無關的固定浪費/過重維運。
+
+### 提案
+- **Modal `keep_warm=1` → scale-to-zero**（§6.2 由 MUST 降級）：主路徑為校內 GPU，fallback 罕用；常駐 L4 ~$800/月只為省偶發 ~10s 冷啟不划算，靠 `/warmup`+readiness 緩解。
+- **v1 觀測先 LangFuse（trace，對 RAG 最有價值）+ Sentry（錯誤）**；Prometheus/Grafana 有明確需求或量起來再加（自託管 LangFuse 已是一組 stack）。
+- **blue-green 雙版本並存窗**從固定 4 週縮為「canary + 短回滾期（數天）」，或舊版降 cold（不佔常駐 RAM）。
+
+### 保留（非過度設計）
+PgBouncer、reranker（已預設關閉 + RAGAS gate）、kb_version 機制本身、citations、MaxSim 介面抽象。
+
+---
+
+## DL-012: 正確性修補——連線不跨串流、引文真實性驗證、快取改本地 embedding
+
+- **狀態**：APPROVED　**日期**：2026-06-07　**影響檔案**：ARCHITECTURE.md §5.6、§3.4、§5.4、§5.7、§6.4、§1.6（補強 DL-004）
+
+### 提案
+1. **DB 連線不得跨 LLM 串流持有**：`retrieve()`/影像 fetch 完成即歸還連線，再進 5–15s 串流（否則 25 連線池在班級突發下 ~1.6 QPS 即耗盡）。orchestrator 用 `async with pool.acquire()` 僅包檢索段。
+2. **引文真實性驗證（不只格式 regex）**：對 LLM 輸出的每個引文，cited book/page 須對照 retrieved top-3、figure 對照 `figures[]`；無法佐證者移除/重生/明確標示未驗證。（強制引文是安全網核心，不能讓捏造合法外觀的引文漏過）
+3. **語意快取改本地輕量 embedding 當 cache key**（補強 DL-004：text-embedding-3-small 仍可作離線/評估用，但**線上 cache lookup 用本地模型**避免 OpenAI 往返）；修 §1.6 延遲預算（OpenAI 往返 100–300ms 與 30ms 命中矛盾）。cache 命中率/precision 上線後實測，先用 exact-normalized-query 快取較安全。
+
+---
+
+## DL-013: 檢索品質 gate——BM25 餵 MT 英文、Top-K 起手 100、recall by question-class
+
+- **狀態**：APPROVED　**日期**：2026-06-07　**影響檔案**：ARCHITECTURE.md §4.5、§4.6、§7.3、§7.7（補強 DL-008）
+
+### 提案
+- **BM25 也餵 DL-008 翻譯後的英文 query**（保留原始混語 query 給生成），讓 hybrid 對中英混合主力流量真正生效；否則重評 BM25/RRF 價值。
+- **Stage A Top-K 起手 50 → 100**：Stage B 成本與語料大小無關（只碰候選頁），提高 Top-K 是便宜的 recall 保險。
+- **上線 gate 改為 recall@K by question-class（text_only/figure_id/cross_page/clinical/oos，含中文 query）**，而非僅 RAGAS faithfulness；binary+mean-pool 的「掉 <3pp」須對本語料實測（評估 float 參考 / binary+INT8 rescore / all-binary / BM25-only 四變體）。
+- encoder p95 SLO 分主/備（校內 <100ms / Modal <300ms）。
