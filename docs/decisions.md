@@ -271,3 +271,89 @@ PgBouncer、reranker（已預設關閉 + RAGAS gate）、kb_version 機制本身
 - **Stage A Top-K 起手 50 → 100**：Stage B 成本與語料大小無關（只碰候選頁），提高 Top-K 是便宜的 recall 保險。
 - **上線 gate 改為 recall@K by question-class（text_only/figure_id/cross_page/clinical/oos，含中文 query）**，而非僅 RAGAS faithfulness；binary+mean-pool 的「掉 <3pp」須對本語料實測（評估 float 參考 / binary+INT8 rescore / all-binary / BM25-only 四變體）。
 - encoder p95 SLO 分主/備（校內 <100ms / Modal <300ms）。
+
+---
+
+> DL-014～DL-018 為 Phase 0 實作起手前，使用者於 2026-06-07 委派 main Claude 提出、並由專案負責人**核准**的五項定案；本日誌記錄之，並回寫 `ARCHITECTURE.md` 對應章節。皆為 in-Postgres／介面後／可回退之低風險調整或既有矛盾之修補。
+
+## DL-014: 檢索排序——v1 先做 pgvector 自建兩階段 baseline；VectorChord 列 Phase 12 PoC
+
+- **狀態**：APPROVED　**提案者**：main Claude（委派）　**日期**：2026-06-07　**裁決者**：專案負責人　**影響檔案**：ARCHITECTURE.md §4.7、§8.1、§8.2（補強 DL-010）
+
+### 背景
+DL-010 將 VectorChord 定為「先做 PoC，通過即只實作它」，自建兩階段「延後完整實作與測試」。但 v1 起手需要一條**已驗證、可靠**的檢索 baseline；把唯一可用路徑押在尚未驗證的擴充上，風險集中於上線初期。
+
+### 提案
+- **v1 先實作並完整測試 pgvector 自建兩階段**（§4.3 Stage A / §4.4 Stage B / §4.5 BM25+RRF / §4.7 介面 / §4.8 測試）作為可靠 baseline。
+- **VectorChord 維持 §4.7 介面、列為 PoC（Phase 12）**；以 **recall@K + p95 + 運維（部署/備份/升級）實測勝出**為唯一切換條件，未勝出則續用自建兩階段。
+- 本提案**微調 DL-010**「先 PoC 通過即只做它」的排序（不是推翻 VectorChord 為長期擴展正解的定位）。
+
+### 影響評估
+- 工作量：小（自建兩階段本即 §4.x 既有設計，僅把實作/測試前置到 v1）。
+- 回退成本：低（兩者皆 in-Postgres、皆藏於 §4.7 介面後；切換不需 re-platform）。
+
+## DL-015: 線上路徑移除 LlamaIndex（不採 RAG 框架）
+
+- **狀態**：APPROVED　**提案者**：main Claude（委派）　**日期**：2026-06-07　**裁決者**：專案負責人　**影響檔案**：ARCHITECTURE.md §5.5、§8.1
+
+### 背景
+原 §8.1 DECIDED 表與 §5.5、技術棧把 LlamaIndex 列為「編排」框架，但本系統的檢索是自訂兩階段（Stage A/B + BM25 + RRF），LLM 呼叫又走原生 `openai` SDK；LlamaIndex 介於中間既不負責檢索核心、也不負責生成，徒增抽象層與相依。
+
+### 提案
+- 線上路徑**不採任何 RAG 框架**；移除 §5.5、§8.1、技術棧中**所有**規範性 LlamaIndex 引用。
+- 檢索編排由 `backend/retrieval/orchestrator.py` 自理（已是 §4.7 的主入口）。
+- 加 **repo 層級斷言（CI grep）**確保程式碼/依賴無 `llama_index` 殘留。
+
+### 影響評估
+- 工作量：小（移除尚未存在的相依；orchestrator 本即設計核心）。
+- 回退成本：低。
+
+## DL-016: v1 校內 SSO 暫緩，以可插拔 auth 抽象替代
+
+- **狀態**：APPROVED　**提案者**：main Claude（委派）　**日期**：2026-06-07　**裁決者**：專案負責人　**影響檔案**：ARCHITECTURE.md §5.8
+
+### 背景
+§5.8 要求所有 `/chat` 走校內 SSO（OAuth2/SAML），但 v1 起手階段校內 SSO 尚未接通，硬性 MUST 會卡住開發與評估流程。
+
+### 提案
+- `backend/api/auth.py` 提供 auth 抽象（`get_current_user`）：**dev** 注入固定 `user_id`；**production** 保留 OIDC 介面與設定文件化。
+- §5.8 的 SSO **MUST** 標注「**接回校內 SSO 時生效**」。
+- `user_id` / 限流 / `query_logs` **照常運作**（dev stub 提供 `user_id`），不因暫緩而失去觀測與限流能力。
+
+### 影響評估
+- 工作量：小。
+- 回退成本：低（介面已預留，接回 SSO 僅補實作）。
+- 合規：不影響「不送 user_id 給 OpenAI」等紅線。
+
+## DL-017: `page_patches` 加 `kb_version` 欄位並納入 PK（使 DL-010 分區可實作）
+
+- **狀態**：APPROVED　**提案者**：main Claude（委派）　**日期**：2026-06-07　**裁決者**：專案負責人　**影響檔案**：ARCHITECTURE.md §3.2、§3.3、§4.4（補強 DL-010）
+
+### 背景
+DL-010 要求 `page_patches` 按 `kb_version`（或 book）分區，但 PostgreSQL **宣告式分區鍵必須包含於 PRIMARY KEY 內**。原 §3.2 schema 的 `page_patches` PK 為 `(page_id, patch_idx)`，不含 `kb_version`，導致 DL-010 的分區無法落地。
+
+### 提案
+- §3.2 `page_patches` 加 `kb_version INTEGER NOT NULL`，PK 改為 `(kb_version, page_id, patch_idx)`，並 `PARTITION BY LIST (kb_version)`。
+- §4.4 Stage B SQL **帶 `kb_version`** 過濾（`WHERE ... AND pp.kb_version = :kb_version`）。
+- §3.3 索引說明更新 PK 描述，並註明 `page_patches` 查詢 **MUST 帶 `kb_version`**。
+
+### 影響評估
+- 工作量：小（schema + 一處 SQL）。
+- 回退成本：低（migration 可逆）；屬離線建庫前的 schema 定案，無生產資料遷移風險。
+
+## DL-018: Vercel AI SDK UI Message Stream——後端手刻薄 emitter（「不自寫」核准例外）
+
+- **狀態**：APPROVED　**提案者**：main Claude（委派）　**日期**：2026-06-07　**裁決者**：專案負責人　**影響檔案**：ARCHITECTURE.md §5.6、§6.3
+
+### 背景
+§5.6 規定「用 sse-starlette + Vercel AI SDK，**不自寫**」。但 AI SDK v5/v6 改用 **UI Message Stream 協定**（typed parts over SSE），且**無官方 Python lib**；後端需要產生符合該協定的事件，無現成套件可用。
+
+### 提案
+- 後端**手刻一個薄 emitter**（集中於 `backend/api/ai_stream.py`）產生 UI Message Stream 事件，作為 §5.6「不自寫」的**核准例外**；前端仍用 `useChat`、**不自寫** SSE/狀態管理。
+- 事件對應：原 `sources` event → 自訂 **`data-sources` part**（前端以 **`onData`** 接收，非舊 `onResponse`）。
+- 傳輸細節：HTTP header `x-vercel-ai-ui-message-stream: v1`；串流以 `data: [DONE]` 收尾。
+- 回寫 §5.6（規則與事件表）、§6.3（串流契約交叉引用）。
+
+### 影響評估
+- 工作量：小至中（薄 emitter + 前端 `onData` 接線）。
+- 回退成本：低（emitter 集中單檔，協定升級時只改一處）。

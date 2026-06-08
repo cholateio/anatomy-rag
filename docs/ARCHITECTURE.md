@@ -388,11 +388,13 @@ CREATE TABLE pages (                          -- 頁面層：Stage A 與 LLM pay
 );
 
 CREATE TABLE page_patches (                    -- 區塊層：Stage B 用
-    page_id     UUID NOT NULL REFERENCES pages(page_id) ON DELETE CASCADE,
+    kb_version  INTEGER NOT NULL,              -- DL-017：分區鍵須在 PK 內
+    page_id     UUID NOT NULL,
     patch_idx   INTEGER NOT NULL,
     patch_bin   BIT(128) NOT NULL,
-    PRIMARY KEY (page_id, patch_idx)
-);
+    PRIMARY KEY (kb_version, page_id, patch_idx),
+    FOREIGN KEY (page_id) REFERENCES pages(page_id) ON DELETE CASCADE
+) PARTITION BY LIST (kb_version);              -- DL-010 分區（每 kb_version 一分區）
 
 CREATE TABLE query_logs (                      -- 觀測 / 評估用
     log_id        BIGSERIAL PRIMARY KEY,
@@ -437,7 +439,8 @@ CREATE INDEX query_logs_user    ON query_logs (user_id, created_at DESC);
 **規則**：
 - **MUST**：所有對 `pages` 的查詢都帶 `WHERE kb_version = :active`
 - **SHOULD**：HNSW 查詢時設 `SET LOCAL hnsw.ef_search = 100`（依 recall 調校）
-- `page_patches` 不需額外索引（PRIMARY KEY 已含 `(page_id, patch_idx)`，按 page_id 過濾足夠快）
+- `page_patches` 不需額外索引（PRIMARY KEY 已含 `(kb_version, page_id, patch_idx)`，按 page_id 過濾足夠快）
+- **MUST（DL-017）**：`page_patches` 的查詢都帶 `WHERE kb_version = :active`（PK 含 `kb_version`、且已按 `kb_version` 分區，見 [§4.4](#44-stage-b--精排maxsim)）
 - **SHOULD（DL-010）**：`page_patches` 按 `kb_version`（或 book）**分區**，利於刪除/備份/重建並避免 blue-green 期間 HNSW 過濾撈不滿候選
 - **MUST（DL-010）**：容量規劃 **Postgres RAM ≥ 作用中版本 `page_patches` 大小**（row+index overhead ≈ ~100 bytes/patch ≈ ~100MB/千頁書；超出 RAM → Stage B 隨機讀退化）。詳見[附錄 D](#附錄-d容量與成本模型)
 
@@ -524,7 +527,7 @@ LIMIT :top_k;
 `score(page) = Σ_{query_tokens t} max_{patches p of page} similarity(t, p)`
 
 ```sql
--- :candidate_page_ids uuid[](來自 Stage A)  :query_tokens_bin bytea[](N 個已二值化)  :top_n int(起手10)
+-- :candidate_page_ids uuid[](來自 Stage A)  :query_tokens_bin bytea[](N 個已二值化)  :kb_version int  :top_n int(起手10)
 WITH query_tokens AS (
     SELECT token_idx, q_bin
     FROM unnest(:query_tokens_bin::bytea[]) WITH ORDINALITY AS qt(q_bin, token_idx)
@@ -535,6 +538,7 @@ token_max_per_page AS (
     FROM page_patches pp
     JOIN query_tokens qt ON true
     WHERE pp.page_id = ANY(:candidate_page_ids)
+      AND pp.kb_version = :kb_version          -- DL-017：page_patches 已按 kb_version 分區，PK 含 kb_version
     GROUP BY pp.page_id, qt.token_idx
 )
 SELECT page_id, SUM(sim) AS maxsim_score
@@ -548,6 +552,7 @@ LIMIT :top_n;
 
 **規則**：
 - **MUST**：Stage B 只接受 Stage A 回傳的 `candidate_page_ids`，不可全表掃描
+- **MUST（DL-017）**：Stage B 查詢 MUST 帶 `kb_version = :active`（`page_patches` 已按 `kb_version` 分區、PK 含 `kb_version`）；由 orchestrator 將作用中 `kb_version` 傳入
 - **SHOULD**：監控 p95 latency，目標 < 200ms（K=50, N=20）
 - **MAY**：若 binary 精度不足（RAGAS context_precision < 0.85），Stage B 改用**更高精度 rescore**（優先 INT8，float32 次選；需另存對應精度的 patch 向量）。詳見 [§2.4](#24-二值化壓縮) 升級路徑（DL-003）。
 
@@ -609,9 +614,9 @@ class RetrievalResult:
 
 # backend/retrieval/
 async def stage_a_coarse(conn, query_pooled_bin: bytes, metadata_filter: dict | None,
-                         kb_version: int, top_k: int = 50) -> list[UUID]: ...
+                         kb_version: int, top_k: int = 100) -> list[UUID]: ...  # DL-013: 起手 100
 async def stage_b_maxsim(conn, candidate_page_ids: list[UUID], query_tokens_bin: list[bytes],
-                         top_n: int = 10) -> list[tuple[UUID, float]]: ...
+                         kb_version: int, top_n: int = 10) -> list[tuple[UUID, float]]: ...  # DL-017: 帶 kb_version
 async def bm25_search(conn, query: str, kb_version: int, top_k: int = 50) -> list[UUID]: ...
 def rrf_fuse(rank_lists: list[list[UUID]], k: int = 60) -> list[tuple[UUID, float]]: ...
 
@@ -621,7 +626,7 @@ async def retrieve(conn, query: str, encoder_result: dict, metadata_filter: dict
     candidate_ids = await stage_a_coarse(
         conn, encoder_result["pooled_bin"], metadata_filter, kb_version)
     # DL-002：序列執行，避免在單一 PgBouncer 連線上併發（asyncpg 禁止同連線併發）
-    stage_b_res = await stage_b_maxsim(conn, candidate_ids, encoder_result["tokens_bin"])
+    stage_b_res = await stage_b_maxsim(conn, candidate_ids, encoder_result["tokens_bin"], kb_version)  # DL-017
     bm25_res = await bm25_search(conn, query, kb_version)
     fused = rrf_fuse([[pid for pid, _ in stage_b_res], bm25_res])
     final_ids = [pid for pid, _ in fused[:top_n]]
@@ -738,7 +743,7 @@ Response: {"tokens_bin": ["base64...", ...], "pooled_bin": "base64...", "model":
 
 ## 5.5 OpenAI 多模態呼叫
 
-LlamaIndex 用於檢索編排，但 LLM 呼叫直接走原生 `openai` SDK（型別清楚、debug 直接）。核心：
+LLM 呼叫走原生 `openai` SDK（型別清楚、debug 直接）；檢索編排由 `backend/retrieval/orchestrator.py` 自理（**DL-015 已移除 LlamaIndex**，線上路徑不採 RAG 框架）。核心：
 
 ```python
 image_contents = [{"type": "image_url",
@@ -779,11 +784,13 @@ LLM 完整生成需 5–15 秒，**MUST** 串流。`/chat` 回 `EventSourceRespo
 
 **規則（不可違反）**：
 - **MUST**：`sources` 必須在第一個 `delta` 之前送出
-- **MUST**：用 sse-starlette + Vercel AI SDK（`useChat` + 自訂 `onResponse` 處理 `sources`），不自寫
+- **MUST**：前端用 Vercel AI SDK `useChat`、**不自寫** SSE/狀態；後端產生事件用集中的薄 emitter（`backend/api/ai_stream.py`，見下方 DL-018），不自行散落手刻
 - **MUST**：後端 timeout ≥ 60 秒
 - **MUST**：寫 query_logs 與寫 cache 用 `asyncio.create_task`，不阻塞 SSE 結束
 - **MUST NOT**：在 SSE 連線中做大量同步 IO（會卡死整個串流）
 - **SHOULD**：client disconnect 時用 `Request.is_disconnected()` 提前取消 LLM 生成（省 token）
+
+> **DL-018**：AI SDK v5/v6 用 **UI Message Stream 協定**（typed parts over SSE），無官方 Python lib → 後端**手刻薄 emitter**（`backend/api/ai_stream.py`）為『不自寫』的**核准例外**（前端仍用 `useChat`、不自寫 SSE/狀態）。事件對應：`sources`→自訂 **`data-sources` part**（前端 **`onData`**，非舊 `onResponse`）；HTTP header `x-vercel-ai-ui-message-stream: v1`；以 `data: [DONE]` 收尾。
 
 ## 5.7 API Schema
 
@@ -806,6 +813,8 @@ class PageCitation(BaseModel):              # 前端可見，由 RetrievalResult
 `build_citations_and_images(results) -> (list[PageCitation], list[bytes])`：並行 `sign_url`（前端用）與 `fetch_bytes`（LLM 吃的原圖）；`figure`＝`metadata.figures` 首項（hint，可為 None）、`snippet=r.docling_md[:200]`。`RetrievalResult` 定義見 [§4.7](#47-模組介面契約)。
 
 ## 5.8 認證
+
+> **DL-016**：v1 校內 SSO **暫緩**，以**可插拔 auth**（`backend/api/auth.py` 的 `get_current_user`：dev 注入固定 `user_id` stub、production 留 OIDC 介面與設定文件化）替代；下列 SSO **MUST** 於**接回校內 SSO 時生效**。`user_id` / 限流 / `query_logs` 照常運作（dev stub 提供 `user_id`）。
 
 - **MUST**：所有 `/chat` 請求需通過校內 SSO（OAuth2 / SAML 整合）
 - **MUST**：query_logs 記錄 user_id（用於限流與抽檢）
@@ -835,7 +844,7 @@ OpenAI 標準付費 API 有 RPM/TPM 限額，課堂同步使用會撞限額。
 
 ## 6.3 串流回應（SSE）
 
-設計與規則見 [§5.6](#56-sse-串流回應)。不可違反的關鍵點：`sources` 必在第一個 `delta` 前送出；用 sse-starlette + Vercel AI SDK；SSE 連線中不做大量同步 IO。
+設計與規則見 [§5.6](#56-sse-串流回應)。不可違反的關鍵點：`sources` 必在第一個 `delta` 前送出；前端用 Vercel AI SDK `useChat`、不自寫；SSE 連線中不做大量同步 IO。**DL-018**：協定為 AI SDK v5/v6 的 UI Message Stream（typed parts over SSE），後端以集中薄 emitter（`backend/api/ai_stream.py`）產生事件（`sources`→`data-sources` part、前端 `onData`；header `x-vercel-ai-ui-message-stream: v1`；`data: [DONE]` 收尾），詳見 [§5.6](#56-sse-串流回應)。
 
 ## 6.4 Redis 語意快取
 
@@ -1008,7 +1017,6 @@ Grafana dashboard：每日查詢量、平均/p95 latency、模型錯誤率（5.5
 | 文字解析 | Docling | LlamaParse, Unstructured | 表格與結構化能力 |
 | 向量/關聯式 DB | PostgreSQL 16+（單一 store：向量+關聯+BM25+ACID） | LanceDB, Qdrant, Vespa, Milvus | 系統本質為關聯+全文+分析，單一 store 勝過雙 store；MaxSim 引擎見 §8.2（DL-007） |
 | 連線池 | PgBouncer（transaction mode） | - | 必要，避免連線耗盡 |
-| 編排 | LlamaIndex | LangChain | 多模態 RAG 原生支援 |
 | 後端 | FastAPI（Python 3.11+） | - | async + SSE |
 | 前端 | Next.js 14+ + Vercel AI SDK | - | useChat 原生支援 SSE |
 | 快取 | Redis 7+ | - | 語意快取 + rate limit |
@@ -1016,13 +1024,15 @@ Grafana dashboard：每日查詢量、平均/p95 latency、模型錯誤率（5.5
 | 評估 | RAGAS | - | 標準 RAG 評估框架 |
 | Encoder 主路徑 | 校內 GPU（RTX 5060 Ti 16GB） | RunPod/Lambda 常駐 | 閒置成本 |
 
+> ~~編排＝LlamaIndex~~ 已於 **DL-015 移除**；線上路徑不採 RAG 框架，檢索編排由 `backend/retrieval/orchestrator.py` 負責（見 [§4.7](#47-模組介面契約)、[§5.5](#55-openai-多模態呼叫)）。
+
 ## 8.2 OPEN（留待實測決定）
 
 | 項目 | 起手值 | 決策時點 |
 |---|---|---|
 | Encoder 模型 | `vidore/colpali-v1.3-hf`（起手） | **中英混合 query**：須對中文 query 跨語言實測；(a) ColPali+查詢翻譯 先測，(b) 跨語言 encoder 備選（DL-008） |
 | HNSW 參數 | `m=16, ef_construction=64, ef_search=100` | 依實測 recall@3 調校 |
-| Stage A Top-K | 50 | recall vs latency 權衡 |
+| Stage A Top-K | 100（DL-013） | recall vs latency 權衡 |
 | Pooling 策略 | mean | 召回不理想再試 max / attention |
 | Reranker | 暫不啟用 | RAGAS faithfulness < 0.85 再評估 |
 | Stage B 精度 | binary Hamming | 不足時升 INT8 rescore（優先）或 float32（DL-003） |
