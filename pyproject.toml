@@ -25,3 +25,7 @@ asyncio_mode = "auto"
 # 也不會讓頂層 colpali_service/ 目錄遮蔽 editable 安裝的 colpali_service 套件。
 # 新增測試檔時 MUST 維持「全域唯一檔名」（如 test_stage_a.py 而非泛用 test_main.py）。
 addopts = "-q"
+markers = [
+  "db: 需要 PostgreSQL 連線的測試（CI db-integration job 才跑；Phase 2 起）",
+  "integration: 跨模組整合測試（可能需 DB/Redis/encoder）",
+]

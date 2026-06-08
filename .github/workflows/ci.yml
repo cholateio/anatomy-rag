@@ -1,0 +1,71 @@
+name: CI
+on: { pull_request: {}, push: { branches: [main] } }
+
+jobs:
+  unit:                                  # 不連 DB：config / healthz / encoder mock / binary 等純單元
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      # uv 預設 sync 會剪除 workspace 成員（root 不依賴成員）；故用 --inexact 累加輕量成員
+      # （不含 torch），且一律以 `uv run --no-sync` 執行以避免重新 sync 又剪除。
+      - run: uv sync --group dev
+      - run: uv sync --package anatomy-backend --inexact
+      - run: uv sync --package colpali-service --inexact
+      - run: uv run --no-sync ruff check .
+      - name: 確認 binary.py 不依賴 torch（D-L）
+        run: uv run --no-sync python -c "import anatomy_shared.binary, sys; assert 'torch' not in sys.modules, 'binary.py 不應載入 torch'; print('binary.py torch-free OK')"
+      - name: 確認無 LlamaIndex 殘留（DL-015）
+        run: "! grep -rIn --include='*.py' 'llama_index' backend ingest eval colpali_service shared || (echo 'LlamaIndex 殘留' && exit 1)"
+      - run: uv run --no-sync pytest backend/tests shared/tests colpali_service/tests -q
+
+  db-integration:                        # Phase 2 起有 DB/檢索測試；Phase 0 驗 migrate 框架可執行
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env: { POSTGRES_USER: anatomy, POSTGRES_PASSWORD: anatomy_dev_pw, POSTGRES_DB: anatomy_rag }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U anatomy" --health-interval 5s --health-timeout 3s --health-retries 10
+      pgbouncer:
+        image: bitnami/pgbouncer:latest    # TODO(verify): pin
+        env:
+          POSTGRESQL_HOST: postgres
+          POSTGRESQL_USERNAME: anatomy
+          POSTGRESQL_PASSWORD: anatomy_dev_pw
+          POSTGRESQL_DATABASE: anatomy_rag
+          PGBOUNCER_PORT: 6432
+          PGBOUNCER_POOL_MODE: transaction
+          PGBOUNCER_AUTH_TYPE: scram-sha-256
+        ports: ["6432:6432"]
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --group dev
+      - run: uv sync --package anatomy-backend --inexact
+      - name: 安裝 psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: 建擴充（CI 無 init.sql 掛載）
+        run: PGPASSWORD=anatomy_dev_pw psql -h localhost -U anatomy -d anatomy_rag -c "CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pg_trgm;"
+      - name: Alembic migrations（Phase 0 為框架驗證 no-op；Phase 2 起有內容）
+        env: { PG_DIRECT_URL: postgresql://anatomy:anatomy_dev_pw@localhost:5432/anatomy_rag }
+        run: cd backend && uv run --no-sync alembic -c alembic.ini upgrade head
+      - name: DB 整合測試（Phase 2 起生效；Phase 0 無 db 標記測試）
+        env:
+          DATABASE_URL: postgresql://anatomy:anatomy_dev_pw@localhost:6432/anatomy_rag
+          PG_DIRECT_URL: postgresql://anatomy:anatomy_dev_pw@localhost:5432/anatomy_rag
+          REDIS_URL: redis://localhost:6379/0
+        run: uv run --no-sync pytest backend/tests -q -m "db or integration" || echo "Phase 0 無 db 測試，Phase 2 起生效"
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: gitleaks/gitleaks-action@v2
+
+  # Phase 11 啟用：RAGAS gate（未達門檻阻擋 merge，§7.3）

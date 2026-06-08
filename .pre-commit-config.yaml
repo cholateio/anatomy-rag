@@ -1,0 +1,14 @@
+# pre-commit 鉤子：本機提交前自動 ruff lint/format + gitleaks 掃密鑰。
+# 安裝：uv tool install pre-commit（或 pipx），然後 pre-commit install。
+# 更新 rev 至最新：pre-commit autoupdate。
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.16          # 對齊 dev group 的 ruff 版本（uv.lock）
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2           # TODO(verify): 執行 `pre-commit autoupdate` 取得最新穩定 rev
+    hooks:
+      - id: gitleaks
