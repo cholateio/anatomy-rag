@@ -1,0 +1,23 @@
+[project]
+name = "anatomy-rag"
+version = "0.0.0"
+requires-python = ">=3.11"
+
+[tool.uv.workspace]
+members = ["shared", "backend", "colpali_service", "ingest", "eval"]
+
+[tool.uv.sources]
+anatomy-shared = { workspace = true }
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff>=0.6", "asgi-lifespan>=2.1", "httpx>=0.27"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+addopts = "-q"

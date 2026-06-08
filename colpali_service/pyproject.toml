@@ -1,0 +1,14 @@
+[project]
+name = "colpali-service"
+version = "0.0.0"
+requires-python = ">=3.11"
+dependencies = ["anatomy-shared", "fastapi>=0.115", "uvicorn[standard]>=0.34",
+                "pydantic>=2.7", "pydantic-settings>=2.3", "numpy>=1.26"]
+[project.optional-dependencies]
+gpu = ["anatomy-shared[colpali]"]   # 真實 ColPali（torch/transformers）；mock/CPU 路徑不需，故設為 extra
+modal = ["modal>=0.64"]
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+[tool.hatch.build.targets.wheel]
+packages = ["src/colpali_service"]
