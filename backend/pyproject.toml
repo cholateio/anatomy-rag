@@ -9,7 +9,8 @@ dependencies = [
   "redis>=5.0", "redisvl>=0.18",
   "openai>=1.40",
   "tenacity>=8.3", "httpx>=0.27",
-  "sentence-transformers>=3.0",
+  # 語意快取的本地 embedding 依賴留待實作快取模組時再加（屆時 decisions.md 決定
+  # sentence-transformers(torch) vs fastembed(ONNX，較輕)）；Phase 0 不引入以保持 backend torch-free。
   "langfuse>=2.0", "sentry-sdk>=2.0",
 ]
 [build-system]
