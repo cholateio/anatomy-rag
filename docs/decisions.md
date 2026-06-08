@@ -278,7 +278,7 @@ PgBouncer、reranker（已預設關閉 + RAGAS gate）、kb_version 機制本身
 
 ## DL-014: 檢索排序——v1 先做 pgvector 自建兩階段 baseline；VectorChord 列 Phase 12 PoC
 
-- **狀態**：APPROVED　**提案者**：main Claude（委派）　**日期**：2026-06-07　**裁決者**：專案負責人　**影響檔案**：ARCHITECTURE.md §4.7、§8.1、§8.2（補強 DL-010）
+- **狀態**：APPROVED　**提案者**：main Claude（委派）　**日期**：2026-06-07　**裁決者**：專案負責人　**影響檔案**：ARCHITECTURE.md §4.1、§4.8、§8.2、附錄 D（補強 DL-010）
 
 ### 背景
 DL-010 將 VectorChord 定為「先做 PoC，通過即只實作它」，自建兩階段「延後完整實作與測試」。但 v1 起手需要一條**已驗證、可靠**的檢索 baseline；把唯一可用路徑押在尚未驗證的擴充上，風險集中於上線初期。

@@ -129,7 +129,7 @@ ColPali query encoder (校內 GPU 主 / Serverless GPU 備)
   └─→ mean-pool 得單一查詢向量
        │
        ▼
-[Stage A] HNSW 在 pages.pooled_bin 上撈 Top-50 候選頁 + JSONB metadata 預過濾
+[Stage A] HNSW 在 pages.pooled_bin 上撈 Top-100 候選頁 + JSONB metadata 預過濾
        │
        ▼
 [Stage B] 候選頁的 patches 做 MaxSim → Top-10 → 與 BM25 RRF 融合 → Top-3
@@ -1203,4 +1203,4 @@ anatomy-rag/
 
 - 單張 RTX 5060 Ti 16GB、~50ms/query → 序列上限 **~20 q/s**；對 ~10k/月穩態綽綽有餘。
 - **風險是突發**（整班同時問）：需 batching + 佇列深度 admission control + 飽和觸發 fallback；再擴充先加第二張 encoder replica 或升級 GPU，**不必動 DB 架構**。
-- Stage B（自建兩階段 fallback）在單機約 20 RPS、Top-K=100 時為 CPU 瓶頸點 → 故 VectorChord PoC + 並發壓測列為**上線 gate**（DL-007/DL-010）。
+- Stage B（自建兩階段 v1 baseline）在單機約 20 RPS、Top-K=100 時為 CPU 瓶頸點 → 故 VectorChord（Phase 12 PoC）+ 並發壓測列為**擴展評估 gate**（DL-007/DL-010/DL-014）。
