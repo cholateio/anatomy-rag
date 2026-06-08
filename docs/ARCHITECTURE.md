@@ -493,11 +493,10 @@ auth_file = /etc/pgbouncer/userlist.txt
 
 ColPali 一頁約 1024 個 patch 向量；千頁教科書 ≈ 100 萬 patch，多本擴展到數百萬。直接對所有 patch 做 query token × patch 全表 MaxSim（cross join），即使有 binary quantization 也無法滿足 < 1 秒互動延遲。pgvector 核心至 2026 仍**無原生 multi-vector MaxSim**；本系統有兩條 **in-Postgres** 路徑（DL-007），皆藏在 [§4.7](#47-模組介面契約) 介面後可互換：
 
-1. **VectorChord 擴充（首選）**：提供原生、高效 MaxSim（decomposed MaxSim，受 XTR-WARP 啟發），採用後可省掉自建兩階段；先 PoC 驗證。
-2. **應用層自建兩階段（baseline/fallback）**：
-
-- **Stage A 粗排**：mean-pooled 單一向量 + HNSW，快速撈 Top-K 候選頁（K=50 起手）
-- **Stage B 精排**：只在 K 個候選頁的 patches 上做完整 MaxSim，取 Top-N
+1. **應用層自建兩階段（v1 baseline）**：v1 先實作並完整測試此路徑當可靠 baseline（DL-014）。
+   - **Stage A 粗排**：mean-pooled 單一向量 + HNSW，快速撈 Top-K 候選頁（K=100 起手，DL-013）
+   - **Stage B 精排**：只在 K 個候選頁的 patches 上做完整 MaxSim，取 Top-N
+2. **VectorChord 擴充（Phase 12 PoC）**：提供原生、高效 MaxSim（decomposed MaxSim，受 XTR-WARP 啟發），採用後可省掉自建兩階段；列為 §4.7 介面後的 PoC（Phase 12），以 recall@K + p95 + 運維實測勝出才切換（DL-014）。
 
 ## 4.2 Query 端編碼契約
 
@@ -508,7 +507,7 @@ encoder service 回傳 `{"tokens_bin": [bytes_16, ...N], "pooled_bin": bytes_16}
 ## 4.3 Stage A — 粗排
 
 ```sql
--- :query_pooled_bin bit(128)  :metadata_filter jsonb(nullable)  :kb_version int  :top_k int(起手50)
+-- :query_pooled_bin bit(128)  :metadata_filter jsonb(nullable)  :kb_version int  :top_k int(起手100, DL-013)
 SELECT page_id, pooled_bin <~> :query_pooled_bin AS distance
 FROM pages
 WHERE kb_version = :kb_version
@@ -655,7 +654,7 @@ async def retrieve(conn, query: str, encoder_result: dict, metadata_filter: dict
 
 ## 4.8 測試契約
 
-> **DL-010**：採 VectorChord（DL-007 首選）時，下列 Stage A/B 測試適用於**自建兩階段 fallback 引擎**；v1 若先上 VectorChord，fallback 保留 §4.7 介面、延後完整實作與測試。
+> **DL-010 / DL-014**：v1 以自建兩階段為 baseline 並完整實作下列 Stage A/B 測試；VectorChord 為 §4.7 介面後的 **Phase 12 PoC**，於其以 recall@K + p95 + 運維實測勝出而切換時另補對應測試（DL-014 已將排序定為「先做 baseline、VectorChord 後 PoC」，取代 DL-010 原「先 PoC 通過即只做它」）。
 
 實作 agent **MUST** 提供：
 - `test_stage_a.py`：100 頁假資料，驗證 HNSW 撈出預期 Top-K
@@ -1036,7 +1035,7 @@ Grafana dashboard：每日查詢量、平均/p95 latency、模型錯誤率（5.5
 | Pooling 策略 | mean | 召回不理想再試 max / attention |
 | Reranker | 暫不啟用 | RAGAS faithfulness < 0.85 再評估 |
 | Stage B 精度 | binary Hamming | 不足時升 INT8 rescore（優先）或 float32（DL-003） |
-| MaxSim 引擎 | VectorChord 原生（首選，PoC）/ pgvector 兩階段（fallback） | 皆 in-Postgres、藏於 §4.7 介面（DL-007） |
+| MaxSim 引擎 | pgvector 兩階段（v1 baseline）/ VectorChord 原生（Phase 12 PoC，勝出才切換） | 皆 in-Postgres、藏於 §4.7 介面（DL-007、DL-014） |
 | RRF `k` | 60 | 標準值 |
 | Encoder 部署 | 校內 GPU 主、Modal 備 | 視校內 GPU 可用性 |
 | 小模型路由（成本優化） | 未啟用 | 配合 query intent classifier |
