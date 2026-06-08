@@ -20,4 +20,8 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# 預設 prepend 模式 + 測試目錄無 __init__.py + 測試檔名全域唯一：
+# 只把各測試檔所在目錄加入 sys.path（不加 repo 根），故無同名 tests 套件衝突、
+# 也不會讓頂層 colpali_service/ 目錄遮蔽 editable 安裝的 colpali_service 套件。
+# 新增測試檔時 MUST 維持「全域唯一檔名」（如 test_stage_a.py 而非泛用 test_main.py）。
 addopts = "-q"

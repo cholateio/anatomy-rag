@@ -13,6 +13,7 @@ def binarize(vec: np.ndarray) -> bytes:
     """將 128 維 float 向量以正負號二值化為 bit(128)，回傳 16 bytes（MSB-first）。
 
     bit_i = 1 if vec_i > 0 else 0；以 np.packbits 打包（每 8 bit 一 byte，共 16 bytes）。
+    邊界：NaN > 0 為 False → bit 0；±0 → bit 0（皆視為非正）。此約定離線/線上兩端一致即可。
     """
     arr = np.asarray(vec, dtype=np.float32).ravel()
     if arr.shape[0] != VECTOR_DIM:
