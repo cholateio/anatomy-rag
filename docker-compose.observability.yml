@@ -1,0 +1,23 @@
+# docker compose -f docker-compose.yml -f docker-compose.observability.yml up
+# LangFuse 用「自己的」Postgres，不直連主 DB（避免違反 §0.3 :5432 紅線）。
+services:
+  langfuse-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD:-langfuse_dev_pw}
+      POSTGRES_DB: langfuse
+    volumes: ["langfusedata:/var/lib/postgresql/data"]
+    healthcheck: { test: ["CMD-SHELL", "pg_isready -U langfuse"], interval: 5s, timeout: 3s, retries: 10 }
+
+  langfuse:
+    image: langfuse/langfuse:latest          # TODO(verify): v3 另需 clickhouse/redis，依官方 self-host compose 補齊
+    depends_on: { langfuse-db: { condition: service_healthy } }
+    environment:
+      DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD:-langfuse_dev_pw}@langfuse-db:5432/langfuse
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
+      SALT: ${LANGFUSE_SALT}
+      NEXTAUTH_URL: http://localhost:3100
+    ports: ["3100:3000"]                      # 對外 3100（DL-006）
+
+volumes: { langfusedata: {} }

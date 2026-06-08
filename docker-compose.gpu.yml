@@ -1,0 +1,11 @@
+# docker compose -f docker-compose.yml -f docker-compose.gpu.yml up
+services:
+  encoder:
+    build: { context: ., dockerfile: colpali_service/Dockerfile }   # GPU 版
+    environment: { ENCODER_MOCK: "false", COLPALI_DEVICE: cuda }
+    deploy:
+      resources:
+        reservations:
+          devices: [{ driver: nvidia, count: 1, capabilities: [gpu] }]
+  backend:
+    environment: { ENCODER_MOCK: "false" }
