@@ -59,7 +59,12 @@ jobs:
           DATABASE_URL: postgresql://anatomy:anatomy_dev_pw@localhost:6432/anatomy_rag
           PG_DIRECT_URL: postgresql://anatomy:anatomy_dev_pw@localhost:5432/anatomy_rag
           REDIS_URL: redis://localhost:6379/0
-        run: uv run --no-sync pytest backend/tests -q -m "db or integration" || echo "Phase 0 無 db 測試，Phase 2 起生效"
+        run: |
+          uv run --no-sync pytest backend/tests -q -m "db or integration"; rc=$?
+          # 只容忍 pytest exit 5（未收集到測試；Phase 0 尚無 db/integration 標記）；
+          # 其餘非零（真實失敗 / 崩潰 / 收集錯誤）一律讓 job 失敗，不得遮蔽（Phase 2 起生效）。
+          if [ "$rc" = "5" ]; then echo "Phase 0 無 db/integration 測試（exit 5 = no tests collected）"; exit 0; fi
+          exit "$rc"
 
   gitleaks:
     runs-on: ubuntu-latest

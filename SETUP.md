@@ -134,12 +134,14 @@ make gpu-smoke
 
 ### B.3 啟動真實 encoder + LLM
 
+> ⚠️ **`make up-gpu` 需 Phase 3**：真實 ColPali encoder（`colpali_service/real_encoder.py`）於 **Phase 3** 才實作。在那之前，`ENCODER_MOCK=false` 會讓 encoder 容器以清楚的 `NotImplementedError` 拒絕啟動（指引你設 `ENCODER_MOCK=true`）。**Phase 0 的 GPU 硬體驗證請用 `make gpu-smoke`（§B.2）**，它只 build GPU 映像並驗 `torch.cuda`，不啟動真實服務。
+
 1. 編輯 `.env`：填入 `OPENAI_API_KEY=sk-...`（**MUST 用 OpenAI 標準付費 API，禁用免費／個人版**），把 `LLM_MOCK=false`。
 2. 以 GPU override 啟動（encoder 改真實 ColPali、`ENCODER_MOCK=false`）：
    ```bash
    make up-gpu
    ```
-- ✅ **成功應看到**：`encoder` 容器 healthy 且 `/healthz` 的 `model` 不再是 `mock-colpali`；GPU 被佔用（`nvidia-smi`）。
+- ✅ **成功應看到**（Phase 3 起）：`encoder` 容器 healthy 且 `/healthz` 的 `model` 不再是 `mock-colpali`；GPU 被佔用（`nvidia-smi`）。
 
 ### B.4 觀測（選用）
 

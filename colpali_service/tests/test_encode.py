@@ -22,3 +22,13 @@ async def test_encode_query_deterministic_contract():
     assert len(base64.b64decode(j1["pooled_bin"])) == 16   # bit(128)=16 bytes
     assert len(j1["tokens_bin"]) >= 1
     assert all(len(base64.b64decode(t)) == 16 for t in j1["tokens_bin"])
+
+
+def test_get_encoder_real_not_implemented_yet(monkeypatch):
+    """ENCODER_MOCK=false 但真實 encoder 未實作（Phase 3 前，如 make up-gpu）→
+    應拋清楚的 NotImplementedError，而非難解的 ModuleNotFoundError。"""
+    import colpali_service.encoder as enc
+
+    monkeypatch.setenv("ENCODER_MOCK", "false")
+    with pytest.raises(NotImplementedError, match="Phase 3"):
+        enc.get_encoder()

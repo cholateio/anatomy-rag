@@ -34,5 +34,14 @@ def get_encoder():
     # Phase 3：ENCODER_MOCK=false 時回真實 ColPali encoder
     if os.environ.get("ENCODER_MOCK", "true").lower() == "true":
         return MockEncoder()
-    from colpali_service.real_encoder import RealColPaliEncoder  # Phase 3 實作
+    # 真實 encoder 於 Phase 3 才實作；在此之前（如 make up-gpu 設 ENCODER_MOCK=false）
+    # 應給出清楚指引，而非讓容器以難解的 ModuleNotFoundError 崩潰。
+    try:
+        from colpali_service.real_encoder import RealColPaliEncoder  # Phase 3 實作
+    except ModuleNotFoundError as e:
+        raise NotImplementedError(
+            "真實 ColPali encoder 尚未實作（Phase 3）。目前僅支援 mock：請設 ENCODER_MOCK=true。"
+            "（make up-gpu 的真實 GPU 推理路徑將於 Phase 3 接 vidore/colpali-v1.3-hf 後啟用；"
+            "Phase 0 的 GPU 硬體驗證請用 make gpu-smoke）"
+        ) from e
     return RealColPaliEncoder()
