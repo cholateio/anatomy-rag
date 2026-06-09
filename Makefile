@@ -31,7 +31,7 @@ migrate:
 gpu-smoke:
 	docker compose -f docker-compose.yml -f docker-compose.gpu.yml build encoder
 	docker compose -f docker-compose.yml -f docker-compose.gpu.yml run --rm encoder \
-	  python -c "import torch; assert torch.cuda.is_available(), 'CUDA 不可用：檢查 cu128/driver'; print('CUDA OK:', torch.cuda.get_device_name(0))"
+	  uv run --no-sync python -c "import torch; assert torch.cuda.is_available(), 'CUDA 不可用：檢查 cu128/driver'; print('CUDA OK:', torch.cuda.get_device_name(0))"
 
 golden-bytes:
 	cd frontend && node scripts/dump-golden-stream.mjs
