@@ -8,11 +8,14 @@
   禁止 hardcode 任何 URL 或密碼。
 """
 
+import asyncio
 import os
 from logging.config import fileConfig
 
 from alembic import context
-from sqlalchemy import create_engine, pool
+from sqlalchemy import pool
+from sqlalchemy.engine import Connection
+from sqlalchemy.ext.asyncio import create_async_engine
 
 # Alembic Config 物件，提供對 alembic.ini 的存取
 config = context.config
@@ -41,6 +44,10 @@ def _get_pg_direct_url() -> str:
             "Alembic 需要 PG_DIRECT_URL"
             "（直連 Postgres :5432 的 migrations 專用連線，§0.3 例外）"
         )
+    # 本專案單一 postgres 驅動 = asyncpg（不引入 psycopg2）；SQLAlchemy 需明確指定方言。
+    # .env 的 PG_DIRECT_URL 維持泛用 postgresql://，此處正規化為 +asyncpg。
+    if url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
     return url
 
 
@@ -60,23 +67,30 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
-def run_migrations_online() -> None:
-    """線上模式：直連 Postgres :5432 執行 DDL（§0.3 例外）。
+def _do_run_migrations(connection: Connection) -> None:
+    """在已建立的（同步化）連線上執行 migrations。"""
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+    )
+    with context.begin_transaction():
+        context.run_migrations()
 
-    使用 NullPool 避免連線池在短暫 migration run 後殘留連線。
+
+async def run_migrations_online() -> None:
+    """線上模式：以 asyncpg 直連 Postgres :5432 執行 DDL（§0.3 例外）。
+
+    使用 NullPool 避免連線池在短暫 migration run 後殘留連線；
+    透過 run_sync 在 async 連線上跑同步的 Alembic migration 流程。
     """
     url = _get_pg_direct_url()
-    connectable = create_engine(url, poolclass=pool.NullPool)
-    with connectable.connect() as connection:
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-        )
-        with context.begin_transaction():
-            context.run_migrations()
+    connectable = create_async_engine(url, poolclass=pool.NullPool)
+    async with connectable.connect() as connection:
+        await connection.run_sync(_do_run_migrations)
+    await connectable.dispose()
 
 
 if context.is_offline_mode():
     run_migrations_offline()
 else:
-    run_migrations_online()
+    asyncio.run(run_migrations_online())

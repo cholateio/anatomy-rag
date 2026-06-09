@@ -22,7 +22,7 @@
 鎖定的關鍵版本（落地起手值，`uv.lock` / `package-lock.json` 已凍結）：
 - 後端 / 建庫：Python ≥ 3.11（系統 3.12 亦可）、FastAPI、asyncpg、Alembic、pydantic v2 等（見 `uv.lock`）。
 - 前端：`next@16.2.7`、`react@19.2.7`、`ai@6.0.197`、`@ai-sdk/react@3.0.199`。
-- 容器映像：`pgvector/pgvector:pg16`（需 pgvector ≥ 0.8）、`bitnami/pgbouncer`、`redis:7-alpine`、`minio/minio`。
+- 容器映像：`pgvector/pgvector:pg16`（需 pgvector ≥ 0.8）、`bitnamilegacy/pgbouncer`（Bitnami 2025H2 下架免費 `docker.io/bitnami/*` latest，改用凍結的 legacy namespace；env 介面相同）、`redis:7-alpine`、`minio/minio`。
 
 ---
 
@@ -156,7 +156,7 @@ make up-obs   # 另起 LangFuse（自帶獨立 Postgres，對外 :3100，避開 
 |---|---|
 | `docker: command not found` | Docker Desktop 未開 WSL Integration；開啟後重開終端機。或改裝 WSL2 原生 docker-ce。 |
 | 服務一直 `health: starting` 或 backend 不 healthy | 看 `docker compose logs <service>`；backend 依賴 pgbouncer/redis/encoder 皆 healthy 才啟動。 |
-| **PgBouncer 啟動失敗 / 連不上** | 用 `bitnami/pgbouncer` 由 env 驅動，確認 `.env` 的 `POSTGRES_*` 正確；若該映像不可用，改用 fallback：自建 `infra/pgbouncer/Dockerfile` + entrypoint 由 env 產生 userlist。 |
+| **PgBouncer 啟動失敗 / 連不上** | 用 `bitnamilegacy/pgbouncer` 由 env 驅動，確認 `.env` 的 `POSTGRES_*` 正確。注意 Bitnami 已下架 `docker.io/bitnami/*` 免費 latest（2025H2），故改用凍結的 `bitnamilegacy/`；若連 legacy 都不可用，fallback：改 `edoburu/pgbouncer` 或自建 `infra/pgbouncer/Dockerfile` + entrypoint 由 env 產生 userlist。 |
 | **Docker build 失敗（uv sync 找不到 workspace 成員）** | 各 Dockerfile 需 COPY 全部成員（shared/backend/colpali_service/ingest/eval）——已內建，若改動勿漏。 |
 | **`make migrate` 連不到 DB** | 它在 backend 容器內跑、連 `postgres:5432`（compose 網路）；勿在宿主機直接 `alembic`。 |
 | `uv run pytest` import 失敗 / 找不到 `anatomy_backend` | workspace root 不依賴成員 → `uv run` 預設 sync 會剪除成員。用 `make test`，或 `uv sync --all-packages` 後 `uv run --no-sync pytest`。 |

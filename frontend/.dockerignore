@@ -1,0 +1,14 @@
+# build context 為 ./frontend；排除本地產物與不需進映像的檔案。
+# 注意：deps 階段會 npm ci 重新安裝，builder 階段的 COPY . . 不應帶入本地 node_modules。
+node_modules
+.next
+out
+npm-debug.log*
+yarn-error.log*
+.env
+.env.*
+Dockerfile
+.dockerignore
+.git
+.gitignore
+README.md

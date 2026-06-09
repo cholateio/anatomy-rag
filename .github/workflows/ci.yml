@@ -29,7 +29,7 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U anatomy" --health-interval 5s --health-timeout 3s --health-retries 10
       pgbouncer:
-        image: bitnami/pgbouncer:latest    # TODO(verify): pin
+        image: bitnamilegacy/pgbouncer:latest    # Bitnami 下架 docker.io/bitnami/* latest（2025H2）→ bitnamilegacy（drop-in）。TODO(verify): pin digest
         env:
           POSTGRESQL_HOST: postgres
           POSTGRESQL_USERNAME: anatomy

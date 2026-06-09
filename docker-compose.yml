@@ -16,7 +16,7 @@ services:
       retries: 10
 
   pgbouncer:                                  # env 驅動：自動產生設定 + userlist（不提交密碼），:6432
-    image: bitnami/pgbouncer:latest           # TODO(verify): pin 版本/digest；若不可用見 SETUP.md fallback
+    image: bitnamilegacy/pgbouncer:latest     # Bitnami 已下架 docker.io/bitnami/* 免費 latest（2025H2）→ 改用 bitnamilegacy（凍結但 drop-in，env 介面不變）。TODO(verify): pin digest；production 評估 edoburu/pgbouncer
     depends_on:
       postgres: { condition: service_healthy }
     environment:
@@ -33,7 +33,10 @@ services:
       PGBOUNCER_DATABASE: ${POSTGRES_DB}
     ports: ["6432:6432"]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 6432 -U ${POSTGRES_USER}"]
+      # bitnami pgbouncer 映像無 pg_isready；改用內建 psql 經 :6432 跑 SELECT 1，
+      # 同時驗證「pgbouncer 能代理到 postgres」的真實路徑。$$ 轉義 → 變數在容器 runtime
+      # 用 bitnami 注入的 POSTGRESQL_* 展開（非 compose parse 時，故密碼不寫進 compose 設定）。
+      test: ["CMD-SHELL", "PGPASSWORD=$$POSTGRESQL_PASSWORD psql -h 127.0.0.1 -p 6432 -U $$POSTGRESQL_USERNAME -d $$POSTGRESQL_DATABASE -tAc 'SELECT 1' || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -93,13 +96,17 @@ services:
       retries: 10
 
   frontend:
-    build: { context: ., dockerfile: frontend/Dockerfile }
+    build: { context: ./frontend, dockerfile: Dockerfile }   # 前端自足：context 為 ./frontend（非根；backend 才需根 context 取 workspace 成員）
     depends_on: { backend: { condition: service_healthy } }
     ports: ["3000:3000"]
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000 >/dev/null 2>&1 || exit 1"]
+      # localhost 在容器內先解析到 IPv6 ::1，但 Next.js standalone 綁 IPv4 0.0.0.0 →
+      # busybox wget 連 ::1 被拒且不 fallback IPv4。改用 node 內建 http 打 127.0.0.1 並驗 200
+      # （node 映像必有 node，免 wget/IPv6 陷阱）。
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 10
+      start_period: 30s
 
 volumes: { pgdata: {}, miniodata: {} }
