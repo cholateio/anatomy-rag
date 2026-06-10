@@ -53,3 +53,61 @@ def test_to_pg_bits_msb_first_matches_binarize():
     vec = np.full(VECTOR_DIM, -1.0)
     vec[0] = 1.0
     assert to_pg_bits(binarize(vec)) == "1" + "0" * 127
+
+
+# --- pool_patches（DL-019：fp32 平均、輸出 float32；halfvec 量化只發生在 DB 綁定層）---
+
+
+def test_pool_patches_shape_dtype_and_mean():
+    """(n,128) → (128,) float32；值為逐維 fp32 平均（不得提早 f16 量化）。"""
+    from anatomy_shared.binary import pool_patches
+
+    patches = np.stack([np.full(VECTOR_DIM, 1.0), np.full(VECTOR_DIM, 3.0)])
+    pooled = pool_patches(patches)
+    assert pooled.shape == (VECTOR_DIM,) and pooled.dtype == np.float32
+    assert np.allclose(pooled, 2.0)
+
+
+def test_pool_patches_accumulates_in_fp32():
+    """float16 輸入也必須以 fp32 累加：±fp16max 與 2.0 的平均應為有限值 ≈ 0.667。"""
+    from anatomy_shared.binary import pool_patches
+
+    big = np.float16(65504.0)  # fp16 最大值；fp16 直接相加會溢位成 inf
+    patches = np.stack([
+        np.full(VECTOR_DIM, big, dtype=np.float16),
+        np.full(VECTOR_DIM, -big, dtype=np.float16),
+        np.full(VECTOR_DIM, 2.0, dtype=np.float16),
+    ])
+    pooled = pool_patches(patches)
+    assert np.all(np.isfinite(pooled))
+    assert np.allclose(pooled, 2.0 / 3.0, atol=1e-3)
+
+
+def test_pool_patches_valid_mask_excludes_padding():
+    """valid_mask=False 的列（padding/特殊 token）不得進入平均。"""
+    from anatomy_shared.binary import pool_patches
+
+    patches = np.stack([
+        np.full(VECTOR_DIM, 1.0),
+        np.full(VECTOR_DIM, 999.0),  # padding 列，應被排除
+    ])
+    pooled = pool_patches(patches, valid_mask=[True, False])
+    assert np.allclose(pooled, 1.0)
+
+
+def test_pool_patches_rejects_empty_and_bad_shape():
+    from anatomy_shared.binary import pool_patches
+
+    with pytest.raises(ValueError):
+        pool_patches(np.ones((2, 64)))                      # 維度錯
+    with pytest.raises(ValueError):
+        pool_patches(np.ones((2, VECTOR_DIM)), valid_mask=[False, False])  # 全被遮罩
+    with pytest.raises(ValueError):
+        pool_patches(np.ones((2, VECTOR_DIM)), valid_mask=[True])          # mask 長度錯
+
+
+def test_pool_patches_accepts_list_input():
+    from anatomy_shared.binary import pool_patches
+
+    pooled = pool_patches([[0.5] * VECTOR_DIM, [1.5] * VECTOR_DIM])
+    assert np.allclose(pooled, 1.0)

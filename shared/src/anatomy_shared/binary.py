@@ -30,3 +30,25 @@ def to_pg_bits(data: bytes) -> str:
     集中在本檔以免離線端與 query 端各自轉換而漂移。
     """
     return "".join(f"{byte:08b}" for byte in data)
+
+
+def pool_patches(patch_embs, valid_mask=None) -> np.ndarray:
+    """多向量 → 單一 pooled 向量（DL-019）：fp32 平均，輸出 float32[128]，不二值化。
+
+    valid_mask（選填，shape=(n,) bool）：False 的列（padding/特殊 token）不進平均。
+    Stage A 用 cosine 距離（對縮放不敏感），故 pool 後不需 re-normalize；
+    float16（halfvec）量化**只發生在 DB 綁定/寫入層**，不在此處——query 端
+    提早量化會無謂損失精度（Codex 審查 HIGH-1）。
+    離線建庫端與 query 端 MUST 共用本函式（§2.4 同一來源原則）。
+    """
+    arr = np.asarray(patch_embs, dtype=np.float32)
+    if arr.ndim != 2 or arr.shape[1] != VECTOR_DIM:
+        raise ValueError(f"pool_patches 期望 (n, {VECTOR_DIM}) 矩陣，收到 {arr.shape}")
+    if valid_mask is not None:
+        mask = np.asarray(valid_mask, dtype=bool)
+        if mask.shape != (arr.shape[0],):
+            raise ValueError(f"valid_mask 長度 {mask.shape} 與 patch 數 {arr.shape[0]} 不符")
+        arr = arr[mask]
+    if arr.shape[0] == 0:
+        raise ValueError("沒有有效 patch 可池化（全部被 valid_mask 排除或輸入為空）")
+    return arr.mean(axis=0)
