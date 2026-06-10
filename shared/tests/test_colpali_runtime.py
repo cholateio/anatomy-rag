@@ -41,6 +41,27 @@ def test_mock_encode_page_accepts_str_key_and_array_image():
     assert np.array_equal(a1.embeddings, a2.embeddings)
 
 
+def test_mock_encode_page_different_keys_produce_different_embeddings():
+    rt = MockColPaliRuntime()
+    assert not np.array_equal(
+        rt.encode_page("gray42:812").embeddings,
+        rt.encode_page("gray42:999").embeddings,
+    )
+
+
+def test_get_runtime_mock_returns_mock_instance():
+    rt = get_runtime(mock=True)
+    assert isinstance(rt, MockColPaliRuntime)
+
+
 def test_get_runtime_real_not_implemented_yet():
     with pytest.raises(NotImplementedError, match="Phase 3"):
         get_runtime(mock=False)
+
+
+def test_encoded_vectors_eq_is_identity_not_value():
+    """eq=False：== 走 identity（不會對 ndarray 做 ambiguous 真值判斷而爆炸）。"""
+    rt = MockColPaliRuntime()
+    e1, e2 = rt.encode_query("q"), rt.encode_query("q")
+    assert (e1 == e2) is False     # 不同實例
+    assert (e1 == e1) is True      # 同一實例

@@ -13,11 +13,12 @@ from dataclasses import dataclass
 import numpy as np
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, eq=False)
 class EncodedVectors:
     """runtime 輸出：embeddings (n,128) float32 + valid_mask (n,) bool。
 
     valid_mask=False 表示 padding 或特殊 token（應排除於池化/二值化之外）。
+    eq=False：ndarray 欄位不支援值比較，比較請用 np.array_equal。
     """
 
     embeddings: np.ndarray
