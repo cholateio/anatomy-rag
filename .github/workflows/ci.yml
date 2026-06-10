@@ -12,12 +12,17 @@ jobs:
       - run: uv sync --group dev
       - run: uv sync --package anatomy-backend --inexact
       - run: uv sync --package colpali-service --inexact
+      - run: uv sync --package anatomy-eval --inexact
       - run: uv run --no-sync ruff check .
-      - name: 確認 binary.py 不依賴 torch（D-L）
-        run: uv run --no-sync python -c "import anatomy_shared.binary, sys; assert 'torch' not in sys.modules, 'binary.py 不應載入 torch'; print('binary.py torch-free OK')"
+      - name: 確認 shared 模組 torch-free（D-L）
+        run: |
+          uv run --no-sync python -c "import anatomy_shared.binary, sys; assert 'torch' not in sys.modules; print('binary torch-free OK')"
+          uv run --no-sync python -c "import anatomy_shared.colpali_runtime, sys; assert 'torch' not in sys.modules; print('colpali_runtime torch-free OK')"
       - name: 確認無 LlamaIndex 殘留（DL-015）
         run: "! grep -rIn --include='*.py' 'llama_index' backend ingest eval colpali_service shared || (echo 'LlamaIndex 殘留' && exit 1)"
-      - run: uv run --no-sync pytest backend/tests shared/tests colpali_service/tests -q
+      - name: 確認 binarize/pool/hamming 僅定義於 shared（§2.4 單一來源）
+        run: "! grep -rInE --include='*.py' 'def (binarize|to_pg_bits|pool_patches|hamming_distance)\\(' backend ingest eval colpali_service || (echo '向量運算函式只能定義在 shared/binary.py' && exit 1)"
+      - run: uv run --no-sync pytest backend/tests shared/tests colpali_service/tests eval/tests -q
 
   db-integration:                        # Phase 2 起有 DB/檢索測試；Phase 0 驗 migrate 框架可執行
     runs-on: ubuntu-latest

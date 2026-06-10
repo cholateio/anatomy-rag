@@ -47,7 +47,9 @@ test:
 	uv run --no-sync pytest
 
 lint:
-	uv run --group dev ruff check .
+	uv sync --group dev --inexact
+	uv run --no-sync ruff check .
 
 fmt:
-	uv run --group dev ruff format .
+	uv sync --group dev --inexact
+	uv run --no-sync ruff format .
