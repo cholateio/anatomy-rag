@@ -71,3 +71,35 @@ def test_synthetic_smoke_binary_maxsim_recall_pipeline():
     expected_classes = {"text_only", "figure_id", "cross_page", "clinical_correlation"}
     assert set(report["by_class"]) == expected_classes
     assert all(v == 1.0 for v in report["by_class"].values())
+
+
+def test_evaluate_raises_on_empty_or_all_oos_golden():
+    """空題庫/全 oos 不得回 0.0 讓 per-class gate 真空通過——必須 raise。"""
+    with pytest.raises(ValueError, match="gate"):
+        evaluate_recall_by_class([], lambda qa: ["p1"], k=3)
+    oos_only = [GoldenQA(id="o1", category="out_of_scope", query="q",
+                         expected_response_type="教材中查無此項")]
+    with pytest.raises(ValueError, match="gate"):
+        evaluate_recall_by_class(oos_only, lambda qa: ["p1"], k=3)
+
+
+def test_recall_at_k_dedupes_retrieved_and_expected():
+    # retrieved 重複不得吃掉 k 窗：去重後前 2 名 = [a, b]
+    assert recall_at_k(["a", "a", "b"], ["b"], k=2) == 1.0
+    # expected 重複不得灌水/稀釋分母：唯一 expected = {p1, p2}，命中 p1 → 0.5
+    assert recall_at_k(["p1", "x", "y"], ["p1", "p1", "p2"], k=3) == 0.5
+
+
+def test_recall_at_k_rejects_bad_k():
+    with pytest.raises(ValueError):
+        recall_at_k(["a"], ["a"], k=0)
+
+
+def test_evaluate_report_includes_per_class_counts():
+    golden = [
+        _mk("t1", "text_only", "q", ["p1"]),
+        _mk("t2", "text_only", "q", ["p1"]),
+        _mk("f1", "figure_id", "q", ["p1"]),
+    ]
+    report = evaluate_recall_by_class(golden, lambda qa: ["p1"], k=1)
+    assert report["n_by_class"] == {"text_only": 2, "figure_id": 1}
