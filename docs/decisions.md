@@ -357,3 +357,86 @@ DL-010 要求 `page_patches` 按 `kb_version`（或 book）分區，但 PostgreS
 ### 影響評估
 - 工作量：小至中（薄 emitter + 前端 `onData` 接線）。
 - 回退成本：低（emitter 集中單檔，協定升級時只改一處）。
+
+---
+
+> DL-019～DL-021 來源：2026-06-10 Phase 1 起手前的獨立 spec+環境審查（fresh-context Claude session；
+> **同模型審查，僅狀態/時間隔離**）。專案負責人裁示「四項 high 級問題採最合適方法修正；涉金錢才回頭討論」，
+> 據此核准。涉費用之選項均列 OPEN 未啟用。
+
+## DL-019: Stage A 的 pooled 向量改存 halfvec(128)，不再二值化
+
+- **狀態**：APPROVED　**提案者**：獨立審查 session（Claude）　**日期**：2026-06-10
+- **影響檔案**：ARCHITECTURE.md §1.4、§1.6、§1.7、§1.9、§2.1、§2.4、§3.2、§3.3、§4.2、§4.3、§4.7、§5.1、§8.1、附錄 D　**裁決者**：專案負責人
+
+### 背景
+§2.4 原 MUST「v1 資料庫只存 bit 版本」與 §3.2 `pooled_bin BIT(128)` 把二值化同時套在 patch 與 pooled 兩種向量。該 MUST 的動機（32× 儲存/計算壓縮）只對 `page_patches`（每頁 ~1024 向量、~100MB/千頁）成立；`pages` 每頁只有 1 個 pooled 向量，halfvec(128) 僅 ~256 bytes/頁（~0.25MB/千頁），成本可忽略。代價端：mean-pool 已是有損摘要，再經 sign 二值化後，Stage A 的距離函數只剩 129 個離散 Hamming 值（大量 tie、排序解析度差），而 Stage A 決定整條檢索鏈的 recall 上限。業界 ColPali 兩階段實務（Vespa/Qdrant/HF binary-quantization 系列）普遍為 patch 量化、pooled/粗排向量留 float。
+
+### 提案
+- `pages.pooled_bin BIT(128)` → `pages.pooled HALFVEC(128)`；HNSW 改 `halfvec_cosine_ops`（cosine 對縮放不敏感，mean 後毋須重新 L2 normalize）。
+- encoder `/encode_query` 契約：`pooled_bin` → `pooled_f32`（base64 之 512-byte little-endian float32[128]；DB 寫入時降為 halfvec）。
+- `shared/binary.py` 職責不變（仍只管 patch 二值化）；§2.4 MUST 改寫為「**`page_patches`** v1 只存 bit」。
+- 評估註記：binary-pooled 變體可由 `binarize(pooled)` 即時導出，DL-013 四變體實測不需另存欄位。
+
+### 替代方案
+(a) 維持 bit pooled——召回上限受限，且成為 DL-013 實測的混淆變數；(b) 同存 bit+halfvec 做 A/B——不必要，binary 版可從 float 即時導出。
+
+### 影響評估
+- 工作量：小（schema 一欄、encoder 契約一鍵、Stage A operator）；Phase 2 動工前改動，零資料遷移成本。
+- 回退成本：低（migration 可逆；Stage A 藏於 §4.7 介面後）。
+- 金錢/硬體：無（儲存增量 ~0.25MB/千頁）。
+
+---
+
+## DL-020: 查詢翻譯落地——encoder 微服務內建本地 MT（中/混語 query → 英文）
+
+- **狀態**：APPROVED　**提案者**：獨立審查 session（Claude）　**日期**：2026-06-10
+- **影響檔案**：ARCHITECTURE.md §1.4、§1.6、§1.7、§4.2、§4.5、§4.7、§5.1、§5.6、§8.1、§8.2、附錄 A（補強 DL-008/DL-013）　**裁決者**：專案負責人
+
+### 背景
+DL-008 已定路徑 (a)「ColPali + 查詢翻譯」、DL-013 要求 BM25 餵翻譯後英文 query，但翻譯模組的引擎、部署位置、延遲預算、失敗 fallback 全未規格化：§1.6 時序沒有 MT 步驟；roadmap 原把 `translate.py` 放在 Phase 6 backend/llm（會把 torch 拖進 backend，違反 D-L）。
+
+### 提案
+- **部署位置**：翻譯內建於 **encoder 微服務**（colpali_service）的 `/encode_query` 管線：偵測語言（query 含 CJK 字元即需翻譯）→ 本地 MT 翻成英文 → 以英文做 ColPali 編碼 → 回傳 `{tokens_bin, pooled_f32, translated_q, lang, model, mt_model}`。backend 維持 torch-free（D-L）；BM25 直接用 `translated_q`（DL-013），英文 query 為 identity。
+- **引擎（DECIDED 起手）**：`Helsinki-NLP/opus-mt-zh-en`（本地、零 API 成本、CPU 數十 ms 級）。**MUST NOT** 用雲端 API 做查詢翻譯（成本、延遲、離線可用性；非隱私紅線——query 本就會送 OpenAI 生成）。**SHOULD**（Phase 3 實測）：解剖術語 glossary 長詞優先替換 + 保護 query 內既有 ASCII/拉丁術語 span 不送 MT。
+- **品質 gate**：MT 路徑成敗以 DL-013「recall@K by question-class（含中文 query）」實測裁決；不達標升級序＝更強本地 MT（NLLB-200-distilled-600M）→ 跨語言 encoder（DL-008 (b)）→ 雲端翻譯（最後選項，涉費用須另走 DL）。
+- **失敗 fallback**：MT 例外 → 以原文編碼、`translated_q=null`、BM25 用原文（中文會空轉，trace 標記 `mt_failed`），不阻斷查詢。
+- **延遲預算**：§1.7 encoder p95 SLO 對含 MT 的中文 query 放寬 +50ms（主 <150ms / Modal <350ms）；§1.6 時序補 MT 步驟。**MUST**：Modal fallback 映像內建同一 MT 模型（主/備契約一致）。
+- **快取**：語意快取 key 維持以「原始 normalized query」為準（翻譯為決定性下游步驟，不進 key）。
+- mock 契約（Phase 0 起）：決定性 identity 翻譯 + CJK 偵測（`mt_model="mock-identity"`），供下游演練。
+
+### 替代方案
+(a) backend 內翻譯：拖 torch 進 backend、違反 D-L；(b) 獨立翻譯微服務：對 v1 過重；(c) OpenAI 翻譯：每查詢新增付費 API 呼叫（費用+延遲），列為最後選項。
+
+### 影響評估
+- 工作量：中（Phase 3 encoder 內加 detect+MT+glossary；Phase 5 BM25 改接 `translated_q`）。
+- 回退成本：低（變更集中於 encoder response 欄位，向後相容）。
+- 金錢/硬體：無新增（本地模型 ~300MB，跑於既有 encoder 容器；無 API 費用）。
+
+---
+
+## DL-021: 多輪對話 v1 政策——無狀態後端 + 規則式追問串接；生成不帶歷史
+
+- **狀態**：APPROVED　**提案者**：獨立審查 session（Claude）　**日期**：2026-06-10
+- **影響檔案**：ARCHITECTURE.md §3.2（query_logs）、§5.6、§5.7、新增 §5.9、§6.4、§8.1　**裁決者**：專案負責人
+
+### 背景
+§5.7 有 `conversation_id`、前端 `useChat` 預設送整段歷史，但 spec 未定義：檢索 query 如何由多輪訊息構造、追問（「那它的神經支配呢？」）如何解指代、歷史佔多少 token、語意快取 key 與上下文的關係。不定義則 Phase 8 `/chat` 無法實作；且任意送全史會直接放大 input token（與 DL-009 省 token 方向牴觸）。
+
+### 提案（v1，零額外 LLM token 為原則）
+- **後端無會話狀態**：`conversation_id` 僅用於 query_logs 分組與前端 UX；`query_logs` 加 `conversation_id UUID NULL` 欄位。
+- **追問判定（純規則、零 LLM 成本）**：當前訊息含中英指代詞（它/其/這/那/該/this/it/that…）或長度 < 8 字 → 視為追問（規則 OPEN，Phase 8 以追問型測例調校）。
+- **檢索**：追問時 `retrieval_q = 前一則 user 訊息 + "\n" + 當前訊息`（不含 assistant 回答）；否則＝當前訊息。翻譯（DL-020）、encode、BM25 皆以 `retrieval_q` 進行——encoder 為本地服務，串接零成本。
+- **生成**：追問時【使用者問題】帶前一問（「前一問：…／當前追問：…」），**不帶歷史回答、不帶先前檢索內容**。token 增量僅前一問文字（~30–80 tokens、只在追問時發生，<1% 輸入量，de minimis 已向專案負責人揭露）。
+- **快取**：追問**不查也不寫**語意快取（答案依賴上下文，快取必錯）；非追問照 §6.4。
+- **請求契約**：`/chat` 接受 AI SDK `useChat` 的 messages 形狀，但後端**只讀取最後兩則 user 訊息**；其餘歷史 **MUST NOT** 進任何 LLM payload。
+- **OPEN（涉 token 費用，啟用須專案負責人核可後走 decisions.md）**：(a) 生成附最近 1–2 輪完整 Q/A（估 +500–1500 input tokens/追問）；(b) LLM query-rewrite/condense（+1 次小模型呼叫/追問）。兩者 MUST 經 RAGAS + 成本評估。
+- 黃金題庫 **SHOULD** 於 Phase 11 增少量追問型案例驗證串接規則。
+
+### 替代方案
+(a) v1 純單輪（連串接都不做）：免費但追問體驗直接壞掉，而規則式串接成本為零；(b) LLM rewrite：檢索品質最佳但每追問多一次付費呼叫，列 OPEN。
+
+### 影響評估
+- 工作量：小（Phase 8 規則函式 + 契約節選；Phase 2 query_logs 一欄）。
+- 回退成本：低（規則集中單處；升級到 rewrite 不改介面）。
+- 金錢/硬體：基線零新增；唯追問時 +~30–80 input tokens（de minimis）。OPEN 項涉實質費用，未啟用。

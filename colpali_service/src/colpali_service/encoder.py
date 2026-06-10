@@ -1,9 +1,17 @@
-"""Encoder 抽象：Phase 0 決定性 mock；Phase 3 接真實 ColPali（colpali_service 的 gpu extra）。"""
+"""Encoder 抽象：Phase 0 決定性 mock；Phase 3 接真實 ColPali + 本地 MT（DL-020）。"""
 import hashlib
 import os
+import re
 
 import numpy as np
 from anatomy_shared.binary import binarize
+
+_CJK_RE = re.compile(r"[㐀-䶿一-鿿]")
+
+
+def _detect_lang(text: str) -> str:
+    """含 CJK 字元即視為需翻譯的中文/混語 query（DL-020）。"""
+    return "zh" if _CJK_RE.search(text) else "en"
 
 
 def _seeded_vectors(text: str, n: int, dim: int = 128) -> np.ndarray:
@@ -25,8 +33,13 @@ class MockEncoder:
         pooled = toks.mean(axis=0)
         return {
             "tokens_bin": [binarize(t) for t in toks],
-            "pooled_bin": binarize(pooled),
+            # DL-019：pooled 不二值化，回傳 512B little-endian float32（DB 端存 halfvec）
+            "pooled_f32": pooled.astype("<f4").tobytes(),
+            # DL-020：mock 為決定性 identity 翻譯（真實本地 MT 於 Phase 3 接 opus-mt-zh-en）
+            "translated_q": q,
+            "lang": _detect_lang(q),
             "model": self.model,
+            "mt_model": "mock-identity",
         }
 
 

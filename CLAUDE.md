@@ -23,7 +23,7 @@
 - Language: Python 3.11+（後端 / 建庫 / 評估）、TypeScript 5+（前端）
 - Backend: FastAPI 0.110+（async + SSE）、uvicorn、sse-starlette、LlamaIndex（RAG 編排）、pydantic v2
 - Frontend: Next.js 14+（App Router）、Vercel AI SDK（`useChat` + SSE）、TailwindCSS、shadcn/ui
-- Datastore: PostgreSQL 16+ + pgvector ≥ 0.8（`bit(128)` + HNSW）+ pg_trgm；**經 PgBouncer 1.21+（transaction pooling）連線**
+- Datastore: PostgreSQL 16+ + pgvector ≥ 0.8（patch `bit(128)` Hamming；pooled `halfvec(128)` HNSW cosine，DL-019）+ pg_trgm；**經 PgBouncer 1.21+（transaction pooling）連線**
 - Cache: Redis 7+（語意快取 via `redisvl` + token-bucket 限流）
 - ML/模型: ColPali `vidore/colpali-v1.3-hf`（視覺多向量）、Docling（PDF→Markdown）、pdf2image+poppler；
   LLM 主 `gpt-5.5` / 備 `gpt-5.4`（**OpenAI 標準付費 API**）

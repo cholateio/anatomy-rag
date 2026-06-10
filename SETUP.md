@@ -99,7 +99,7 @@ B=$(curl -s -X POST localhost:8001/encode_query -H 'content-type: application/js
 curl -s localhost:3000 | grep -q "系統骨架運行中" && echo "frontend OK"
 ```
 - ✅ **成功應看到**：四行 `... OK`。
-- 📝 `encode_query` 會回 `{"tokens_bin":[...], "pooled_bin":"<16-byte base64>", "model":"mock-colpali"}`；`pooled_bin` base64 解碼後為 16 bytes（= bit(128)）。
+- 📝 `encode_query` 會回 `{"tokens_bin":[...], "pooled_f32":"<512-byte base64>", "translated_q":"...", "lang":"zh|en", "model":"mock-colpali", "mt_model":"mock-identity"}`；`tokens_bin` 每個元素 base64 解碼後 16 bytes（= bit(128)），`pooled_f32` 解碼後 512 bytes（= float32[128]，DL-019 不二值化）；`translated_q` 在 mock 模式為原文（DL-020 identity）。
 - 📝 前端 `:3000` 目前是**骨架頁**；真正的 `/chat` 在 Phase 8。
 
 ### A.7 本機跑測試與 lint（選用，不需 Docker）

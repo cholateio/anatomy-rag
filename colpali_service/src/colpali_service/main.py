@@ -29,8 +29,11 @@ async def encode_query(req: EncodeRequest) -> dict:
     out = _encoder.encode_query(req.q)
     return {
         "tokens_bin": [_b64(t) for t in out["tokens_bin"]],
-        "pooled_bin": _b64(out["pooled_bin"]),
+        "pooled_f32": _b64(out["pooled_f32"]),     # DL-019：512B LE float32[128]
+        "translated_q": out["translated_q"],        # DL-020：BM25 用；MT 失敗為 null
+        "lang": out["lang"],
         "model": out["model"],
+        "mt_model": out["mt_model"],
     }
 
 

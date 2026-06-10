@@ -1,5 +1,9 @@
 # Phase 0 — 環境與專案骨架 詳細實作計畫（v2，已納入 Codex 跨模型審查）
 
+> ⚠️ **歷史文件（2026-06-10 註記）**：Phase 0 已執行完畢。其後 encoder 契約依 **DL-019/DL-020** 變更
+> （`pooled_bin` → `pooled_f32`、新增 `translated_q`/`lang`/`mt_model`）；本檔內的舊契約片段僅為執行
+> 當時的快照，現行契約以 `docs/ARCHITECTURE.md` §4.2/§5.1 為準。
+>
 > **For agentic workers:** REQUIRED SUB-SKILL: 用 `superpowers:subagent-driven-development`（建議）或 `superpowers:executing-plans` 逐任務實作。步驟用 `- [ ]` 追蹤。
 >
 > 上層路線圖：`2026-06-07-anatomy-rag-roadmap.md`（v2）。權威 spec：`docs/ARCHITECTURE.md` 附錄 A/B、§1.5、§3.4、§6.9。

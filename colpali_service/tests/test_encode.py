@@ -19,9 +19,21 @@ async def test_encode_query_deterministic_contract():
         r2 = await c.post("/encode_query", json={"q": "肱二頭肌的起止點"})
     j1, j2 = r1.json(), r2.json()
     assert j1 == j2                                   # 決定性
-    assert len(base64.b64decode(j1["pooled_bin"])) == 16   # bit(128)=16 bytes
+    assert len(base64.b64decode(j1["pooled_f32"])) == 512  # float32[128]，DL-019 不二值化
     assert len(j1["tokens_bin"]) >= 1
-    assert all(len(base64.b64decode(t)) == 16 for t in j1["tokens_bin"])
+    assert all(len(base64.b64decode(t)) == 16 for t in j1["tokens_bin"])  # patch bit(128)
+    # DL-020：中文 query 偵測 + mock identity 翻譯
+    assert j1["lang"] == "zh" and j1["translated_q"] == "肱二頭肌的起止點"
+    assert j1["mt_model"] == "mock-identity"
+
+
+@pytest.mark.asyncio
+async def test_encode_query_english_is_identity_lang_en():
+    """純英文 query：lang=en、translated_q 為原文（DL-020 identity 路徑）。"""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post("/encode_query", json={"q": "origin of biceps brachii"})
+    j = r.json()
+    assert j["lang"] == "en" and j["translated_q"] == "origin of biceps brachii"
 
 
 def test_get_encoder_real_not_implemented_yet(monkeypatch):

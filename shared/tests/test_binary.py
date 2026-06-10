@@ -5,7 +5,7 @@
 """
 import numpy as np
 import pytest
-from anatomy_shared.binary import VECTOR_DIM, binarize
+from anatomy_shared.binary import VECTOR_DIM, binarize, to_pg_bits
 
 
 def test_returns_16_bytes_for_128d():
@@ -40,3 +40,16 @@ def test_wrong_dimension_raises_value_error():
     """非 128 維輸入應拋 ValueError，避免靜默產生錯誤長度的 bit 串。"""
     with pytest.raises(ValueError):
         binarize(np.ones(64))
+
+
+def test_to_pg_bits_length_and_extremes():
+    """16 bytes → 128 字元 '0'/'1' 字串（§4.4 SQL 綁定用；PostgreSQL 無 bytea→bit cast）。"""
+    assert to_pg_bits(b"\xff" * 16) == "1" * 128
+    assert to_pg_bits(b"\x00" * 16) == "0" * 128
+
+
+def test_to_pg_bits_msb_first_matches_binarize():
+    """位序必須與 binarize 的 np.packbits（MSB-first）一致：vec[0]>0 對應字串第 1 個字元。"""
+    vec = np.full(VECTOR_DIM, -1.0)
+    vec[0] = 1.0
+    assert to_pg_bits(binarize(vec)) == "1" + "0" * 127

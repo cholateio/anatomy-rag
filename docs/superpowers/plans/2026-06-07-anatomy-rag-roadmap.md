@@ -8,7 +8,7 @@
 
 **Goal:** 把 `docs/ARCHITECTURE.md` 的設計藍圖，分階段落地成一套「全新機器照 `SETUP.md` 就能跑起來」、規格功能皆有對應測試、帶強制引文與教育用途浮水印的地端多模態（圖+文）解剖學 RAG 問答系統。
 
-**Architecture:** 兩條獨立路徑 —（1）**離線批次建庫**：Docling 解析 PDF → Markdown + 頁面 PNG，ColPali 編碼成多向量 → mean-pool + 二值化（`shared/binary.py` 單一來源）→ PostgreSQL；（2）**線上推理**：query 經獨立 GPU encoder 微服務編碼 → 兩階段檢索（Stage A HNSW 粗排 / Stage B MaxSim 精排）+ BM25 RRF 融合 → 條件式附圖 → OpenAI LLM（強制引文）→ SSE 串流回 Next.js。檢索引擎藏在 `backend/retrieval/` §4.7 介面後（**引擎中立查詢表示**，見 D-K）：**v1 baseline = pgvector 自建兩階段（bit128）**，VectorChord 為介面後的 PoC。
+**Architecture:** 兩條獨立路徑 —（1）**離線批次建庫**：Docling 解析 PDF → Markdown + 頁面 PNG，ColPali 編碼成多向量 → patch 二值化（`shared/binary.py` 單一來源）＋ mean-pool 為 halfvec pooled（DL-019）→ PostgreSQL；（2）**線上推理**：query 經獨立 GPU encoder 微服務編碼（內含本地 MT 翻譯，DL-020）→ 兩階段檢索（Stage A HNSW 粗排 / Stage B MaxSim 精排）+ BM25 RRF 融合 → 條件式附圖 → OpenAI LLM（強制引文）→ SSE 串流回 Next.js。檢索引擎藏在 `backend/retrieval/` §4.7 介面後（**引擎中立查詢表示**，見 D-K）：**v1 baseline = pgvector 自建兩階段（bit128）**，VectorChord 為介面後的 PoC。
 
 **Tech Stack:** Python 3.11+（uv）、FastAPI + sse-starlette + asyncpg、PostgreSQL 16 + pgvector ≥0.8（`bit(128)` + HNSW + pg_trgm）經 PgBouncer（transaction pooling）、Redis 7 + redisvl、ColPali `vidore/colpali-v1.3-hf`（transformers `ColPaliForRetrieval`，cu128 PyTorch）、Docling、OpenAI 標準付費 API（`gpt-5.5`/`gpt-5.4`，原生 `openai` SDK）、Next.js 14+ + Vercel AI SDK（`useChat`，UI Message Stream 協定）、RAGAS 0.4.x、LangFuse + Sentry、Docker Compose。
 
@@ -75,7 +75,7 @@ anatomy-rag/
 │       ├── retrieval/{types.py, query_repr.py(引擎中立查詢表示,D-K), stage_a.py, stage_b.py,
 │       │              bm25.py, rrf.py, engine.py(MaxSimEngine), engine_selfbuilt.py, orchestrator.py}
 │       ├── encoder/client.py               # primary→fallback（§5.1 MUST，D-O）
-│       ├── llm/{client.py, fallback.py, prompts.py, image_routing.py, translate.py(BM25/跨語言,D), mock.py}
+│       ├── llm/{client.py, fallback.py, prompts.py, image_routing.py, mock.py}   # translate 移至 colpali_service（DL-020）
 │       ├── cache/semantic_cache.py         # 只快取已驗證答案（D-I）
 │       ├── api/{main.py, chat.py, ai_stream.py(emitter,D-H), schemas.py, citations.py(驗證,D-N),
 │       │        feedback.py(回饋 endpoint), auth.py(dev stub+OIDC), ratelimit.py}
@@ -83,7 +83,7 @@ anatomy-rag/
 │   └── tests/
 │
 ├── colpali_service/{Dockerfile(GPU,cu128), Dockerfile.cpu, modal_app.py(optional),
-│                    src/colpali_service/{main.py, encoder.py}, tests/}
+│                    src/colpali_service/{main.py, encoder.py, translate.py(本地MT,DL-020)}, tests/}
 ├── ingest/src/anatomy_ingest/{docling_parser.py, page_render.py, colpali_encoder.py,
 │                              writer.py(savepoint/checkpoint,D), storage.py, cli.py}
 ├── eval/{eval_thresholds.yaml,
@@ -107,8 +107,8 @@ Phase 0 (環境+骨架; 治理優先 Task0.1)
    │       └─> Phase 4 (離線建庫) ── 需 Phase 2 + Phase 1
    ├─> Phase 2 (DB 層: page_patches 含 kb_version, 分區; migrations)
    │       └─> Phase 5 (兩階段檢索 + 引擎中立查詢表示) ── 需 Phase 2 + 假資料
-   │               需 Phase 6 的 translate.py（BM25 餵英文 query, DL-013）
-   ├─> Phase 6 (LLM 層 + translate.py)   [可獨立, 用 mock]
+   │               BM25 餵 encoder 回傳之 translated_q（DL-013/DL-020；Phase 3 提供）
+   ├─> Phase 6 (LLM 層；translate 已移至 Phase 3, DL-020)   [可獨立, 用 mock]
    ├─> Phase 7 (語意快取, 只快取已驗證)   [需 Redis + Phase 8 驗證結果]
    └─> Phase 9 (觀測性 + Sentry 脫敏 + 告警)  [橫切]
 Phase 8 (API + SSE) ── 整合 3/5/6/7 + auth + ratelimit + 引文驗證 + feedback endpoint
@@ -128,7 +128,7 @@ Stage B 並發/p95 benchmark gate（附錄 D.5）：v1 上線前必過。
 | 2 | 資料庫層 + migrations（page_patches 含 kb_version） | §3、DL-017 | 0 | 中 |
 | 3 | ColPali encoder 微服務（+ 決定性 mock） | §5.1、§4.2 | 1 | 中 |
 | 4 | 離線建庫管線（savepoint 語意） | §2 | 1,2 | 大 |
-| 5 | 兩階段檢索（引擎中立查詢表示, baseline） | §4 | 2,(6 translate) | 大（核心） |
+| 5 | 兩階段檢索（引擎中立查詢表示, baseline） | §4 | 2,3 | 大（核心） |
 | 6 | LLM 層 + 翻譯模組 | §5.3/5.4/5.5、§6.1、DL-008/013 | 0 | 中 |
 | 7 | 語意快取（只快取已驗證） | §6.4 | 0,8 | 小 |
 | 8 | API 與 SSE（emitter + 引文驗證 + feedback） | §1.6/1.8、§5.6/5.7/5.8、§6.3/6.8 | 3,5,6,7 | 大（核心） |
@@ -167,43 +167,43 @@ Stage B 並發/p95 benchmark gate（附錄 D.5）：v1 上線前必過。
 ### Phase 1 — 共用二值化 `shared/` + 評估 harness 種子
 
 - **目標**：實作離線端與 query 端**唯一**二值化/池化來源（§2.4），`binary.py` **純 numpy 無 torch**（D-L）；ColPali runtime（含 mock）在 `[colpali]` extra；建立**最小 recall harness 種子**（D-P）。
-- **產出**：`binary.py`（`binarize(vec)->bytes(16)` sign-based、`pool_patches(...)`：**fp32 mean → 去 padding/特殊 token → 重新 L2 normalize → binarize**、`hamming_distance`；輸入接受 numpy/list，不依賴 torch）；`colpali_runtime.py`（`ColPaliForRetrieval`+`ColPaliProcessor`、bf16、SDPA、`MockColPaliRuntime` 決定性）在 extra；`eval/harness.py` + `tests/golden_qa.seed.jsonl`（每類 2–3 題）。
+- **產出**：`binary.py`（`binarize(vec)->bytes(16)` sign-based、`to_pg_bits()`（bytes→PostgreSQL bit 字串唯一轉換點，§4.4）、`pool_patches(...)`：**fp32 mean → 去 padding/特殊 token → 輸出 float32 pooled（DL-019，不二值化、不 renorm；halfvec 量化只在 DB 綁定層）**、`hamming_distance`；輸入接受 numpy/list，不依賴 torch）；`colpali_runtime.py`（**穩定介面 `EncodedVectors`（embeddings+valid_mask）+ `MockColPaliRuntime` 決定性、torch-free**；真實 `ColPaliForRetrieval`+`ColPaliProcessor`（bf16、SDPA）依 2026-06-10 Codex plan review **移由 Phase 3 承接**）；`eval/harness.py` + `tests/golden_qa.seed.jsonl`（每類 2–3 題）。
 - **驗收標準**：binarize round-trip 一致 + 位序對照 §2.4；pool 排除 padding/前綴；mock runtime 形狀/決定性；**`binary.py` import 不拉 torch**（測試斷言）；harness 能對假資料算 recall@K by class。
 - **風險與研究註記**：mean 必 fp32；ColPali token L2-normalized → pool 後重 normalize；兩端 import 同函式（CI grep 禁他處重複定義 binarize）。
 
 ### Phase 2 — 資料庫層 + migrations（page_patches 含 kb_version）
 
 - **目標**：schema（**DL-017：`page_patches` 含 `kb_version`、PK 含之、按 kb_version 分區**）、索引、Alembic 可逆遷移、asyncpg pool（連 :6432、`statement_cache_size=0`）、kb_version 輔助、**Stage A SET LOCAL 包同一 transaction 的 helper**（D-G）。
-- **產出**：migrations `001_extensions`…`004_page_patches`（含 kb_version + 分區）…`006_indexes`（HNSW `bit_hamming_ops`、GIN、kb_version）…`007_ingest_errors`；`pool.py`、`kb_version.py`、`tx_helpers.py`（`async with conn.transaction(): SET LOCAL ...; SELECT ...`）。
+- **產出**：migrations `001_extensions`…`004_page_patches`（含 kb_version + 分區）…`006_indexes`（pages.pooled HNSW `halfvec_cosine_ops`（DL-019）、GIN、kb_version）…`007_ingest_errors`；`pool.py`、`kb_version.py`、`tx_helpers.py`（`async with conn.transaction(): SET LOCAL ...; SELECT ...`）。
 - **驗收標準**：`upgrade head`/`downgrade base` 可逆無殘留；對真實 Postgres 插假資料，`bit(128) <~>` 可運算、HNSW/GIN 存在、分區生效（不同 kb_version 落不同分區）；pool 連 6432 + `statement_cache_size=0`（屬性斷言）；所有 `pages`/`page_patches` 查詢帶 `WHERE kb_version`；**CI db-integration job 跑 migration + 這些測試**。
 - **風險與研究註記**：分區鍵須在 PK（DL-017）；§4.4 Stage B SQL 也帶 kb_version。
 
 ### Phase 3 — ColPali encoder 微服務 + 決定性 mock
 
-- **目標**：FastAPI :8001 `/encode_query`（`tokens_bin[]`+`pooled_bin`）、`/healthz`(readiness)、`/warmup`；真實 ColPali(cu128)+**決定性 mock**（D-D，下游可演練契約）；用 `shared[colpali]`。
+- **目標**：FastAPI :8001 `/encode_query`（`tokens_bin[]`+`pooled_f32`+`translated_q`/`lang`，DL-019/020）、`/healthz`(readiness)、`/warmup`；**真實 ColPali runtime（承接 Phase 1 固定的 `EncodedVectors` 介面：`shared/colpali_runtime.get_runtime(mock=False)`，`ColPaliForRetrieval`+`ColPaliProcessor`、bf16/SDPA、cu128）**＋**本地 MT 翻譯**（DL-020：CJK 偵測 + opus-mt-zh-en + 術語 glossary；mock=identity）＋**決定性 mock**（D-D，下游可演練契約）；用 `shared[colpali]`。
 - **產出**：`main.py`、`encoder.py`、Dockerfile(GPU,cu128,`--no-sync`)、Dockerfile.cpu、`modal_app.py`(optional)。
-- **驗收標準**：mock `/encode_query` 決定性、無 GPU 可跑（CI）、契約（token 數、pooled 16 bytes、base64）；真實模式（GPU smoke）載入無 uninitialized 警告、binarize 與離線端一致；readiness 行為正確；**過 recall harness gate**（D-P）。
+- **驗收標準**：mock `/encode_query` 決定性、無 GPU 可跑（CI）、契約（token 數、pooled_f32 512 bytes、translated_q/lang、base64）；真實模式（GPU smoke）載入無 uninitialized 警告、binarize 與離線端一致、本地 MT 對中文 query 產英文（DL-020）；readiness 行為正確；**過 recall harness gate**（D-P，含中文 query）。
 - **風險與研究註記**：transformers 版本 pin；Blackwell cu128/SDPA；Modal data-residency 走 DL 才在 production 啟用。
 
 ### Phase 4 — 離線建庫管線（savepoint 語意）
 
 - **目標**：CLI：PDF+YAML → Docling MD+metadata、pdf2image PNG → ColPali 編碼 → `shared` 二值化 → 寫 pages/page_patches(帶 kb_version) + MinIO PNG；**明訂 transaction 語意**（D 修 Codex Dim3-4）。**MUST NOT 呼叫雲端 LLM。**
 - **產出**：`docling_parser.py`、`page_render.py`、`colpali_encoder.py`、`writer.py`（**每頁 savepoint：成功 release、失敗 rollback 至 savepoint 並寫 `ingest_errors` 後續跑，整書非單一 all-or-nothing**）、`storage.py`、`cli.py`（`--kb-version`/`--resume`/`--batch-size`）。
-- **驗收標準**：小樣本 PDF 成功寫入、pages 數=頁數、patches/pooled_bin 存在、PNG 上 MinIO（**依賴 minio-init bucket**）；metadata 規範化（§3.2 + figures[]）；`--resume` 續跑、單頁失敗寫 ingest_errors 不中斷、抽樣校驗 5%；測試斷言**無任何雲端 LLM 呼叫**（網路 mock）。
+- **驗收標準**：小樣本 PDF 成功寫入、pages 數=頁數、patches/pooled（halfvec，DL-019）存在、PNG 上 MinIO（**依賴 minio-init bucket**）；metadata 規範化（§3.2 + figures[]）；`--resume` 續跑、單頁失敗寫 ingest_errors 不中斷、抽樣校驗 5%；測試斷言**無任何雲端 LLM 呼叫**（網路 mock）。
 - **風險與研究註記**：Docling v2 API；大 PDF 自切頁 + checkpoint；逐頁 MD 漏字抽檢；pdf2image 需 poppler。
 
 ### Phase 5 — 兩階段檢索（引擎中立查詢表示, baseline）
 
 - **目標**：§4.7 介面 + **引擎中立查詢表示**（D-K）+ self-built 引擎：Stage A、Stage B(MaxSim)、BM25、RRF、orchestrator（DL-002 序列、IN 不保序重排、單一 SQL metadata、帶 kb_version、**Top-K=100** D-R）。
 - **產出**：`query_repr.py`（`QueryRepr`：暴露 binary tokens + 可選 float multivector + capability flags；self-built 用 binary、VectorChord 用 float adapter）、`types.py`、`stage_a.py`、`stage_b.py`、`bm25.py`、`rrf.py`、`engine.py`(介面)、`engine_selfbuilt.py`、`orchestrator.py`。
-- **驗收標準（§4.8）**：`test_stage_a`（100 頁假資料、Top-K=100、metadata/kb_version）；`test_stage_b`（5 頁、MaxSim 與手算一致、只掃候選）；`test_rrf`；`test_orchestrator`（5 題迷你 golden、回 `list[RetrievalResult]` 順序=RRF）；Stage B/BM25 單 conn 序列；Stage A SET LOCAL 在同 txn；**BM25 餵 `translate.py` 的英文 query（DL-013）**；**過 recall harness gate**（D-P）；**Stage B 並發/p95 benchmark gate**（附錄 D.5）。
+- **驗收標準（§4.8）**：`test_stage_a`（100 頁假資料、Top-K=100、metadata/kb_version）；`test_stage_b`（5 頁、MaxSim 與手算一致、只掃候選）；`test_rrf`；`test_orchestrator`（5 題迷你 golden、回 `list[RetrievalResult]` 順序=RRF）；Stage B/BM25 單 conn 序列；Stage A SET LOCAL 在同 txn；**BM25 餵 encoder 回傳的 `translated_q`（DL-013/DL-020）**；**過 recall harness gate**（D-P）；**Stage B 並發/p95 benchmark gate**（附錄 D.5）。
 - **風險與研究註記**：MaxSim SQL `<~>` 或 `bit_count(a # b)`；DB 連線不跨 LLM 串流（Phase 8 落實）；VectorChord float 路徑由 D-K adapter 承接（Phase 12）。
 
 ### Phase 6 — LLM 層 + 翻譯模組
 
-- **目標**：原生 `openai` SDK 串流、模型 fallback、版本化 prompt、條件式附圖（DL-009）、strip user_id、**翻譯模組**（DL-008/013：語言偵測 + 中→英 MT，BM25/檢索用；含決定性 mock）、mock LLM。
-- **產出**：`client.py`、`fallback.py`（tenacity、連 3 次 5xx/429 切 gpt-5.4）、`prompts.py`、`image_routing.py`、`translate.py`（`detect_lang` + `to_english`；mock 為查表/identity）、`mock.py`。
-- **驗收標準**：mock 串流 token；fallback 計數切換；image_routing 表驅動（pure_text→0 圖、figure_heavy→1~2 圖 detail:high）；payload **不含 user_id**（斷言）；`translate.py` 對中文 query 回英文（mock 決定性）、英文 query identity；**過 recall harness gate**（翻譯影響檢索 D-P）。
+- **目標**：原生 `openai` SDK 串流、模型 fallback、版本化 prompt、條件式附圖（DL-009）、strip user_id、mock LLM。（~~翻譯模組~~已依 **DL-020** 移至 Phase 3 encoder 服務）
+- **產出**：`client.py`、`fallback.py`（tenacity、連 3 次 5xx/429 切 gpt-5.4）、`prompts.py`、`image_routing.py`、`mock.py`。
+- **驗收標準**：mock 串流 token；fallback 計數切換；image_routing 表驅動（pure_text→0 圖、figure_heavy→1~2 圖 detail:high）；payload **不含 user_id**（斷言）。
 - **風險與研究註記**：gpt-5.5/5.4 影像 token 計法未定（§9.10 不嵌成本邏輯）；解剖術語誤譯風險低但 MT 失敗要 fallback 原文。
 
 ### Phase 7 — 語意快取（只快取已驗證）
@@ -215,7 +215,7 @@ Stage B 並發/p95 benchmark gate（附錄 D.5）：v1 上線前必過。
 
 ### Phase 8 — API 與 SSE（emitter + 引文驗證 + feedback）★核心整合
 
-- **目標**：`/chat` 串接 快取→encoder→檢索→條件式附圖→LLM→**UI Message Stream SSE**（D-H emitter，`data-sources` 在第一個 text-delta 前）；可插拔 auth（dev stub）、Redis 限流；**DB 連線不跨 LLM 串流**（DL-012）；**引文驗證政策**（D-N）；**feedback endpoint**（Codex Dim3-6）；`/healthz`/`/warmup` 全鏈路預熱。
+- **目標**：`/chat` 串接 快取→encoder→檢索→條件式附圖→LLM→**UI Message Stream SSE**（D-H emitter，`data-sources` 在第一個 text-delta 前）；可插拔 auth（dev stub）、Redis 限流；**DB 連線不跨 LLM 串流**（DL-012）；**引文驗證政策**（D-N）；**feedback endpoint**（Codex Dim3-6）；**多輪對話契約（DL-021）**：只讀最後兩則 user 訊息、規則式追問串接 retrieval_q、追問不查/不寫快取；`/healthz`/`/warmup` 全鏈路預熱。
 - **產出**：`main.py`、`chat.py`、`ai_stream.py`（emitter + **對 `infra/golden/ai_stream_golden.jsonl` 的對照測試**）、`schemas.py`、`citations.py`（server sources grounded + 行內引文驗證 + 警告 banner 標示）、`feedback.py`（寫 `query_logs.feedback`、auth、驗證）、`auth.py`、`ratelimit.py`。
 - **驗收標準**：端到端（mock encoder/LLM + 假資料）SSE 事件序：`start`→`data-sources`→`text-delta`*→`text-end`→`finish`→`[DONE]`，**sources 在第一個 delta 前**；header `x-vercel-ai-ui-message-stream: v1`；**golden bytes 對照通過**；DB 連線於 retrieve+圖 fetch 後歸還、不跨串流（連線計數斷言）；限流 429+Retry-After（多 worker 一致）、admin 不受限；**未驗證行內引文 → 警告 banner + 標示、不入快取**；payload 無 user_id；錯誤矩陣（encoder/LLM 全失敗推 error event）；收尾 `asyncio.create_task`；feedback endpoint 寫入 + 測試。
 - **風險與研究註記**：最高整合風險＝協定 wire-format（D-H golden 去風險）；sse-starlette 15s ping 需實測不干擾 parser；client disconnect 取消生成。
@@ -232,7 +232,7 @@ Stage B 並發/p95 benchmark gate（附錄 D.5）：v1 上線前必過。
 - **目標**：Next.js App Router + `useChat`+`DefaultChatTransport` 指後端 `/chat`；渲染 `data-sources` 引用面板、串流文字、免責同意視窗、👍/👎 回饋（打 Phase 8 feedback endpoint）、教育用途浮水印、**未驗證引文警告 banner**（D-N）。
 - **產出**：`app/`、`components/{ChatPanel,CitationPanel,DisclaimerModal,FeedbackButtons,Watermark,UnverifiedBanner}`、`lib/`；pin `ai`/`@ai-sdk/react` + 提交 `package-lock.json`（D-S）。
 - **驗收標準**：對後端/mock SSE：先顯示引用面板→串流文字→完成；免責視窗持久化；底部浮水印；👍/👎+文字寫入；倒讚提示回報；未驗證引文顯示 banner；全繁體中文。
-- **風險與研究註記**：D-H（`data-sources` persistent part、`onData`）；鎖 ai 精確版、勿用 canary；text-stream 模式不可用。建議搭配 `frontend-design` skill。
+- **風險與研究註記**：D-H（`data-sources` persistent part、`onData`）；鎖 ai 精確版、勿用 canary；text-stream 模式不可用。**MUST 使用 `frontend-design` skill**（使用者 2026-06-10 指示）。
 
 ### Phase 11 — 評估擴充（RAGAS + 保留/kappa/回歸）
 

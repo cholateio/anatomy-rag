@@ -20,3 +20,13 @@ def binarize(vec: np.ndarray) -> bytes:
         raise ValueError(f"binarize 期望 {VECTOR_DIM} 維向量，收到 {arr.shape[0]} 維")
     bits = (arr > 0).astype(np.uint8)
     return np.packbits(bits).tobytes()
+
+
+def to_pg_bits(data: bytes) -> str:
+    """將 binarize 產出的 bytes 轉為 PostgreSQL bit 字串（'0'/'1'，MSB-first）。
+
+    PostgreSQL 沒有 bytea→bit 的 cast；SQL 綁定（§4.4 Stage B）一律經本函式轉成
+    text 再 `::bit(128)`。位序與 binarize 的 np.packbits（MSB-first）為同一約定，
+    集中在本檔以免離線端與 query 端各自轉換而漂移。
+    """
+    return "".join(f"{byte:08b}" for byte in data)
