@@ -52,3 +52,10 @@ def pool_patches(patch_embs, valid_mask=None) -> np.ndarray:
     if arr.shape[0] == 0:
         raise ValueError("沒有有效 patch 可池化（全部被 valid_mask 排除或輸入為空）")
     return arr.mean(axis=0)
+
+
+def hamming_distance(a: bytes, b: bytes) -> int:
+    """兩個等長 bit 串（bytes）的 Hamming 距離；§4.4 `<~>` 的純 Python 對照。"""
+    if len(a) != len(b):
+        raise ValueError(f"長度不一致：{len(a)} vs {len(b)} bytes")
+    return (int.from_bytes(a, "big") ^ int.from_bytes(b, "big")).bit_count()

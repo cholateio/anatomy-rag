@@ -111,3 +111,30 @@ def test_pool_patches_accepts_list_input():
 
     pooled = pool_patches([[0.5] * VECTOR_DIM, [1.5] * VECTOR_DIM])
     assert np.allclose(pooled, 1.0)
+
+
+# --- hamming_distance ---
+
+
+def test_hamming_distance_identical_zero_and_complement_full():
+    from anatomy_shared.binary import hamming_distance
+
+    a = binarize(np.random.default_rng(7).standard_normal(VECTOR_DIM))
+    assert hamming_distance(a, a) == 0
+    flipped = bytes(b ^ 0xFF for b in a)
+    assert hamming_distance(a, flipped) == 128
+
+
+def test_hamming_distance_known_value():
+    from anatomy_shared.binary import hamming_distance
+
+    a = b"\x00" * 15 + b"\x0f"   # 末 4 bit 不同
+    b = b"\x00" * 16
+    assert hamming_distance(a, b) == 4
+
+
+def test_hamming_distance_length_mismatch_raises():
+    from anatomy_shared.binary import hamming_distance
+
+    with pytest.raises(ValueError):
+        hamming_distance(b"\x00" * 16, b"\x00" * 15)
