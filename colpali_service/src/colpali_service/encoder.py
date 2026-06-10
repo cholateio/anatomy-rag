@@ -1,10 +1,12 @@
-"""Encoder 抽象：Phase 0 決定性 mock；Phase 3 接真實 ColPali + 本地 MT（DL-020）。"""
-import hashlib
+"""Encoder 抽象：Phase 0/1 決定性 mock（delegate 到 shared runtime）。
+
+Phase 3 接真實 ColPali + 本地 MT（DL-020）。
+"""
 import os
 import re
 
-import numpy as np
-from anatomy_shared.binary import binarize
+from anatomy_shared.binary import binarize, pool_patches
+from anatomy_shared.colpali_runtime import MockColPaliRuntime
 
 _CJK_RE = re.compile(r"[㐀-䶿一-鿿]")
 
@@ -14,27 +16,26 @@ def _detect_lang(text: str) -> str:
     return "zh" if _CJK_RE.search(text) else "en"
 
 
-def _seeded_vectors(text: str, n: int, dim: int = 128) -> np.ndarray:
-    """以 query 文字雜湊播種，產生決定性 float 向量（mock 用）。"""
-    seed = int.from_bytes(hashlib.sha256(text.encode("utf-8")).digest()[:8], "big")
-    rng = np.random.default_rng(seed)
-    return rng.standard_normal((n, dim)).astype("float32")
-
-
 class MockEncoder:
-    """決定性 mock：滿足 /encode_query 契約，供下游（後端 client、檢索）演練。"""
+    """決定性 mock：滿足 /encode_query 契約，供下游（後端 client、檢索）演練。
+
+    向量來源＝shared 的 MockColPaliRuntime；二值化/池化＝shared.binary（§2.4 單一來源）。
+    """
 
     ready = True
-    model = "mock-colpali"
+
+    def __init__(self) -> None:
+        self._runtime = MockColPaliRuntime()
+        self.model = self._runtime.model_id
 
     def encode_query(self, q: str) -> dict:
-        n_tokens = 20  # 典型 query token 數
-        toks = _seeded_vectors(q, n_tokens)
-        pooled = toks.mean(axis=0)
+        enc = self._runtime.encode_query(q)
+        valid = enc.embeddings[enc.valid_mask]   # 排除 padding/特殊前綴 token（§2.4 / roadmap AC）
+        # DL-019：pooled 不二值化、全程 fp32（halfvec 量化只發生在 DB 綁定層）
+        pooled_f32 = pool_patches(enc.embeddings, valid_mask=enc.valid_mask).astype("<f4")
         return {
-            "tokens_bin": [binarize(t) for t in toks],
-            # DL-019：pooled 不二值化，回傳 512B little-endian float32（DB 端存 halfvec）
-            "pooled_f32": pooled.astype("<f4").tobytes(),
+            "tokens_bin": [binarize(t) for t in valid],
+            "pooled_f32": pooled_f32.tobytes(),
             # DL-020：mock 為決定性 identity 翻譯（真實本地 MT 於 Phase 3 接 opus-mt-zh-en）
             "translated_q": q,
             "lang": _detect_lang(q),

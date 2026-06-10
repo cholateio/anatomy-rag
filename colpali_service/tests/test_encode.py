@@ -44,3 +44,25 @@ def test_get_encoder_real_not_implemented_yet(monkeypatch):
     monkeypatch.setenv("ENCODER_MOCK", "false")
     with pytest.raises(NotImplementedError, match="Phase 3"):
         enc.get_encoder()
+
+
+@pytest.mark.asyncio
+async def test_encode_query_distinct_queries_and_fp32_pooled_contract():
+    """守護重構（Codex MEDIUM-4）：不同 query 產不同 token；token 數＝有效 token 數
+    （排除特殊前綴）；pooled_f32＝有效 token 的 fp32 平均（不得有 f16 量化）。"""
+    import numpy as np
+    from anatomy_shared.binary import pool_patches
+    from anatomy_shared.colpali_runtime import MockColPaliRuntime
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r1 = await c.post("/encode_query", json={"q": "肱二頭肌"})
+        r2 = await c.post("/encode_query", json={"q": "橈神經"})
+    j1, j2 = r1.json(), r2.json()
+    assert j1["tokens_bin"] != j2["tokens_bin"]
+    rt = MockColPaliRuntime()
+    assert len(j1["tokens_bin"]) == rt.n_query_tokens - rt.n_special_prefix
+    enc = rt.encode_query("肱二頭肌")
+    expected = pool_patches(enc.embeddings, valid_mask=enc.valid_mask).astype("<f4")
+    got = np.frombuffer(base64.b64decode(j1["pooled_f32"]), dtype="<f4")
+    assert np.array_equal(got, expected)
+    assert j1["model"] == "mock-colpali"
