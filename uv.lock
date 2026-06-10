@@ -264,21 +264,32 @@ name = "anatomy-eval"
 version = "0.0.0"
 source = { editable = "eval" }
 dependencies = [
+    { name = "anatomy-shared" },
+    { name = "numpy" },
+    { name = "pyyaml" },
+]
+
+[package.optional-dependencies]
+ragas = [
     { name = "datasets" },
     { name = "langchain-openai" },
-    { name = "pyyaml" },
     { name = "ragas" },
+]
+review = [
     { name = "streamlit" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "datasets", specifier = ">=2.19" },
-    { name = "langchain-openai", specifier = ">=0.1" },
+    { name = "anatomy-shared", editable = "shared" },
+    { name = "datasets", marker = "extra == 'ragas'", specifier = ">=2.19" },
+    { name = "langchain-openai", marker = "extra == 'ragas'", specifier = ">=0.1" },
+    { name = "numpy", specifier = ">=1.26" },
     { name = "pyyaml", specifier = ">=6" },
-    { name = "ragas", specifier = ">=0.4,<0.5" },
-    { name = "streamlit", specifier = ">=1.35" },
+    { name = "ragas", marker = "extra == 'ragas'", specifier = ">=0.4,<0.5" },
+    { name = "streamlit", marker = "extra == 'review'", specifier = ">=1.35" },
 ]
+provides-extras = ["ragas", "review"]
 
 [[package]]
 name = "anatomy-ingest"
