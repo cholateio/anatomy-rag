@@ -116,3 +116,23 @@ def test_load_golden_rejects_oos_with_pages_and_wrong_response_type(tmp_path):
                              "expected_response_type": "找不到"}) + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="教材中查無此項"):
         load_golden(f)
+
+
+def test_load_golden_rejects_non_object_json_lines(tmp_path):
+    """合法 JSON 但根非物件（裸字串/陣列）→ 受控 ValueError 帶行號，不得 AttributeError。"""
+    f = tmp_path / "bad.jsonl"
+    f.write_text('"just a string"\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="line 1"):
+        load_golden(f)
+    f.write_text('[1, 2]\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="JSON 物件"):
+        load_golden(f)
+
+
+def test_load_golden_rejects_explicit_null_list_fields(tmp_path):
+    """expected_pages/expected_concepts 顯式 null → 受控 ValueError，不得 TypeError。"""
+    f = tmp_path / "null.jsonl"
+    f.write_text(json.dumps({"id": "x", "category": "text_only", "query": "q",
+                             "expected_pages": None}) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="null"):
+        load_golden(f)

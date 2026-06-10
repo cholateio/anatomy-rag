@@ -40,6 +40,8 @@ def load_golden(path: str | Path) -> list[GoldenQA]:
             raw = json.loads(line)
         except json.JSONDecodeError as e:
             raise ValueError(f"line {lineno}: 無效 JSON——{e}") from e
+        if not isinstance(raw, dict):
+            raise ValueError(f"line {lineno}: 每行必須是 JSON 物件，收到 {type(raw).__name__}")
         cat = raw.get("category")
         if cat == "should_refuse":
             raise ValueError(f"line {lineno}: 黃金題庫不得有 should_refuse 類別（§7.2）")
@@ -56,6 +58,8 @@ def load_golden(path: str | Path) -> list[GoldenQA]:
         seen_ids.add(raw["id"])
         for field_name in ("expected_pages", "expected_concepts"):
             val = raw.get(field_name)
+            if val is None and field_name in raw:
+                raise ValueError(f"line {lineno}: {field_name} 不得為 null")
             if val is not None:
                 if not isinstance(val, list) or not all(isinstance(s, str) and s for s in val):
                     raise ValueError(f"line {lineno}: {field_name} 必須是字串清單")
