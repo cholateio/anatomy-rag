@@ -1,0 +1,46 @@
+"""MockColPaliRuntime 契約測試：形狀、valid_mask、決定性、torch-free（D-L）。"""
+import subprocess
+import sys
+
+import numpy as np
+import pytest
+from anatomy_shared.colpali_runtime import EncodedVectors, MockColPaliRuntime, get_runtime
+
+
+def test_fresh_import_is_torch_free():
+    """以 fresh subprocess 驗證 import 不拉 torch（D-L）；
+    避免同進程中其他測試/插件已載入 torch 造成誤判（Codex MEDIUM-6）。"""
+    code = "import anatomy_shared.colpali_runtime, sys; assert 'torch' not in sys.modules"
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_mock_encode_query_shape_mask_and_determinism():
+    rt = MockColPaliRuntime()
+    enc1 = rt.encode_query("肱二頭肌的起止點")
+    enc2 = rt.encode_query("肱二頭肌的起止點")
+    assert isinstance(enc1, EncodedVectors)
+    assert enc1.embeddings.shape == (rt.n_query_tokens, 128)
+    assert enc1.embeddings.dtype == np.float32
+    assert enc1.valid_mask.shape == (rt.n_query_tokens,) and enc1.valid_mask.dtype == np.bool_
+    # mock 固定把前 2 個位置標為特殊/前綴 token（False）——演練「池化排除前綴」
+    assert not enc1.valid_mask[0] and not enc1.valid_mask[1]
+    assert enc1.valid_mask.sum() == rt.n_query_tokens - rt.n_special_prefix
+    assert np.array_equal(enc1.embeddings, enc2.embeddings)
+    assert not np.array_equal(enc1.embeddings, rt.encode_query("另一個問題").embeddings)
+
+
+def test_mock_encode_page_accepts_str_key_and_array_image():
+    rt = MockColPaliRuntime()
+    p1 = rt.encode_page("gray42:812")
+    p2 = rt.encode_page("gray42:812")
+    assert p1.embeddings.shape == (rt.n_page_patches, 128) and p1.embeddings.dtype == np.float32
+    assert bool(p1.valid_mask.all())                  # 頁面 patch 全有效
+    assert np.array_equal(p1.embeddings, p2.embeddings)
+    arr_img = np.zeros((4, 4, 3), dtype=np.uint8)     # array-like 影像（真實版為 PIL）
+    a1, a2 = rt.encode_page(arr_img), rt.encode_page(arr_img)
+    assert np.array_equal(a1.embeddings, a2.embeddings)
+
+
+def test_get_runtime_real_not_implemented_yet():
+    with pytest.raises(NotImplementedError, match="Phase 3"):
+        get_runtime(mock=False)
