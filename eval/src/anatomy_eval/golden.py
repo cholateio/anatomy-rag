@@ -25,6 +25,10 @@ class GoldenQA:
     metadata_filter: dict | None = field(default=None)
     expected_response_type: str | None = None
 
+    # 顯式不可雜湊：metadata_filter 為 dict（unhashable）；與其「None 可 hash、dict 爆炸」
+    # 的不一致行為，不如一律禁止（需要去重請用 item.id）。__eq__ 仍為值比較。
+    __hash__ = None  # type: ignore[assignment]
+
 
 def load_golden(path: str | Path) -> list[GoldenQA]:
     items: list[GoldenQA] = []
@@ -32,7 +36,10 @@ def load_golden(path: str | Path) -> list[GoldenQA]:
     for lineno, line in enumerate(Path(path).read_text(encoding="utf-8").splitlines(), 1):
         if not line.strip():
             continue
-        raw = json.loads(line)
+        try:
+            raw = json.loads(line)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"line {lineno}: 無效 JSON——{e}") from e
         cat = raw.get("category")
         if cat == "should_refuse":
             raise ValueError(f"line {lineno}: 黃金題庫不得有 should_refuse 類別（§7.2）")
@@ -47,6 +54,14 @@ def load_golden(path: str | Path) -> list[GoldenQA]:
         if raw["id"] in seen_ids:
             raise ValueError(f"line {lineno}: 重複 id {raw['id']!r}")
         seen_ids.add(raw["id"])
+        for field_name in ("expected_pages", "expected_concepts"):
+            val = raw.get(field_name)
+            if val is not None:
+                if not isinstance(val, list) or not all(isinstance(s, str) and s for s in val):
+                    raise ValueError(f"line {lineno}: {field_name} 必須是字串清單")
+        mf = raw.get("metadata_filter")
+        if mf is not None and not isinstance(mf, dict):
+            raise ValueError(f"line {lineno}: metadata_filter 必須是物件或 null")
         item = GoldenQA(
             id=raw["id"],
             category=cat,

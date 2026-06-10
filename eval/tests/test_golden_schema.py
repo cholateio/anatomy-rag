@@ -69,3 +69,50 @@ def test_goldenqa_is_frozen():
     it = GoldenQA(id="a", category="text_only", query="q", expected_pages=("a:1",))
     with pytest.raises(AttributeError):
         it.query = "changed"  # type: ignore[misc]
+
+
+def test_goldenqa_is_unhashable_consistently():
+    """__hash__=None：不論 metadata_filter 是 None 或 dict，hash 一律 TypeError（不留地雷）。"""
+    a = GoldenQA(id="a", category="text_only", query="q", expected_pages=("a:1",))
+    b = GoldenQA(id="b", category="text_only", query="q", expected_pages=("a:1",),
+                 metadata_filter={"k": "v"})
+    for item in (a, b):
+        with pytest.raises(TypeError):
+            hash(item)
+    # 值相等仍保留
+    assert a == GoldenQA(id="a", category="text_only", query="q", expected_pages=("a:1",))
+
+
+def test_load_golden_rejects_string_pages_and_bad_types(tmp_path):
+    """expected_pages 給裸字串（忘了方括號）必須報錯，不得拆成單字元 tuple。"""
+    f = tmp_path / "s.jsonl"
+    f.write_text(json.dumps({"id": "x", "category": "text_only", "query": "q",
+                             "expected_pages": "gray42:812"}) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="字串清單"):
+        load_golden(f)
+    bad_row = {"id": "x", "category": "text_only", "query": "q",
+               "expected_pages": ["a:1"], "metadata_filter": "musculoskeletal"}
+    f.write_text(json.dumps(bad_row) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="metadata_filter"):
+        load_golden(f)
+
+
+def test_load_golden_reports_file_lineno_for_malformed_json(tmp_path):
+    f = tmp_path / "bad.jsonl"
+    f.write_text('{"id": "ok1", "category": "out_of_scope", "query": "q", '
+                 '"expected_response_type": "教材中查無此項"}\n{not json}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="line 2"):
+        load_golden(f)
+
+
+def test_load_golden_rejects_oos_with_pages_and_wrong_response_type(tmp_path):
+    f = tmp_path / "oos.jsonl"
+    f.write_text(json.dumps({"id": "o1", "category": "out_of_scope", "query": "q",
+                             "expected_pages": ["a:1"],
+                             "expected_response_type": "教材中查無此項"}) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="out_of_scope"):
+        load_golden(f)
+    f.write_text(json.dumps({"id": "o2", "category": "out_of_scope", "query": "q",
+                             "expected_response_type": "找不到"}) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="教材中查無此項"):
+        load_golden(f)
