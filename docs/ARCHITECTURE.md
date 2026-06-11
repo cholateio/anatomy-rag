@@ -373,30 +373,30 @@ CREATE TABLE books (
     edition    TEXT,
     isbn       TEXT,
     license    TEXT,                          -- 授權型態，留作稽核
-    added_at   TIMESTAMPTZ DEFAULT NOW()
+    added_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE TABLE pages (                          -- 頁面層：Stage A 與 LLM payload 來源
     page_id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     book_id         UUID NOT NULL REFERENCES books(book_id),
-    page_num        INTEGER NOT NULL,
+    page_num        INTEGER NOT NULL CHECK (page_num >= 1),
     page_image_uri  TEXT NOT NULL,             -- S3/MinIO 路徑（PNG）
     docling_md      TEXT NOT NULL,             -- 結構化文字
     metadata        JSONB NOT NULL DEFAULT '{}',
     pooled          HALFVEC(128) NOT NULL,     -- mean-pooled patch 向量（float16；DL-019 不二值化）
     text_tsv        TSVECTOR
                      GENERATED ALWAYS AS (to_tsvector('simple', docling_md)) STORED,
-    kb_version      INTEGER NOT NULL,          -- 見 §6.6
+    kb_version      INTEGER NOT NULL CHECK (kb_version >= 1),  -- 見 §6.6
     embed_model     TEXT NOT NULL,             -- 例：'colpali-v1.3-hf'
-    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (book_id, page_num, kb_version),
     UNIQUE (kb_version, page_id)               -- 供 page_patches 複合 FK（版本一致性，DL-022 審查修訂）
 );
 
 CREATE TABLE page_patches (                    -- 區塊層：Stage B 用
-    kb_version  INTEGER NOT NULL,              -- DL-017：分區鍵須在 PK 內
+    kb_version  INTEGER NOT NULL CHECK (kb_version >= 1),  -- DL-017：分區鍵須在 PK 內
     page_id     UUID NOT NULL,
-    patch_idx   INTEGER NOT NULL,
+    patch_idx   INTEGER NOT NULL CHECK (patch_idx >= 0),
     patch_bin   BIT(128) NOT NULL,
     PRIMARY KEY (kb_version, page_id, patch_idx),
     FOREIGN KEY (kb_version, page_id)          -- 複合 FK：防 v1 patch 指到 v2 page 的跨版本錯配
@@ -412,8 +412,8 @@ CREATE TABLE query_logs (                      -- 觀測 / 評估 / 回饋 + DL-
     answer          TEXT,
     feedback        SMALLINT CHECK (feedback IN (-1, 0, 1)),
     feedback_text   TEXT,                      -- §6.5 MUST：👍/👎 附文字回饋
-    latency_ms      INTEGER,
-    kb_version      INTEGER,
+    latency_ms      INTEGER CHECK (latency_ms IS NULL OR latency_ms >= 0),
+    kb_version      INTEGER CHECK (kb_version IS NULL OR kb_version >= 1),
     status          TEXT NOT NULL DEFAULT 'ok'
                      CHECK (status IN ('ok', 'llm_error', 'encoder_error',
                                        'retrieval_error', 'cancelled')),
@@ -432,10 +432,10 @@ CREATE TABLE query_logs (                      -- 觀測 / 評估 / 回饋 + DL-
 
 CREATE TABLE ingest_errors (                   -- 建庫失敗紀錄（§2.6；schema 依 DL-022 授權由實作定案）
     error_id    BIGSERIAL PRIMARY KEY,
-    kb_version  INTEGER NOT NULL,
+    kb_version  INTEGER NOT NULL CHECK (kb_version >= 1),
     book_id     UUID REFERENCES books(book_id),
-    page_num    INTEGER,                       -- NULL = 整書層級失敗
-    stage       TEXT NOT NULL,                 -- parse|render|encode|upload|write
+    page_num    INTEGER CHECK (page_num IS NULL OR page_num >= 1),  -- NULL = 整書層級失敗
+    stage       TEXT NOT NULL CHECK (stage IN ('parse', 'render', 'encode', 'upload', 'write')),  -- parse|render|encode|upload|write
     error_type  TEXT NOT NULL,                 -- 例外類別名
     message     TEXT NOT NULL,
     detail      JSONB NOT NULL DEFAULT '{}',   -- traceback 摘要 / batch 資訊

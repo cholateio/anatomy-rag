@@ -1,4 +1,10 @@
-"""001: PostgreSQL 擴充——vector(pgvector) + pg_trgm（§3.1）。"""
+"""001: PostgreSQL 擴充——vector(pgvector) + pg_trgm（§3.1）。
+
+本 migration 擁有 extensions（CI 由此建立）；本機 compose 的 infra/postgres/init.sql
+亦可能先建（IF NOT EXISTS 容忍）。
+downgrade 會 DROP——dev 可逆性測試 OK；生產環境不應 downgrade 001
+（extensions 可能被其他物件依賴，PostgreSQL 會擋）。
+"""
 from alembic import op
 
 revision = "001_extensions"

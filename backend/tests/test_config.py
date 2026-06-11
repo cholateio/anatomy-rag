@@ -3,6 +3,7 @@ from anatomy_backend.config import Settings
 from pydantic import ValidationError
 
 _BASE = {"PG_DIRECT_URL": "postgresql://u:p@postgres:5432/db", "REDIS_URL": "redis://redis:6379/0"}
+_BASE_WITH_DB = {**_BASE, "DATABASE_URL": "postgresql://u:p@pgbouncer:6432/db"}
 
 
 def test_defaults_dev_mode(monkeypatch):
@@ -37,6 +38,15 @@ def test_missing_required_database_url_fails_fast(monkeypatch):
     for k, v in _BASE.items():
         monkeypatch.setenv(k, v)
     with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_pg_direct_url_must_target_postgres_5432(monkeypatch):
+    """PG_DIRECT_URL 必須直連 Postgres :5432；指向 PgBouncer :6432 應被拒（解析 DSN port）。"""
+    for k, v in _BASE_WITH_DB.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.setenv("PG_DIRECT_URL", "postgresql://u:p@pgbouncer:6432/db")  # 錯指 PgBouncer
+    with pytest.raises(ValidationError, match="5432"):
         Settings(_env_file=None)
 
 

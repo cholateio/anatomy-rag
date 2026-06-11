@@ -199,6 +199,59 @@ async def test_required_indexes_exist(db_conn):
     assert "hnsw" in hnsw_def and "halfvec_cosine_ops" in hnsw_def
 
 
+async def test_pages_and_patches_quality_checks(clean_db):
+    """Fix E：品質 CHECK 約束——page_num/kb_version/patch_idx/stage 非法值必在 DB 層被擋。"""
+    import asyncpg
+
+    conn = clean_db
+    await conn.execute(
+        "INSERT INTO books (book_id, title) VALUES ($1, 'QC Test Book')"
+        " ON CONFLICT (book_id) DO NOTHING",
+        BOOK_ID,
+    )
+    await ensure_kb_partition(conn, 1)
+
+    # pages: page_num >= 1（0 應被 CHECK 擋）
+    with pytest.raises(asyncpg.CheckViolationError):
+        await conn.execute(
+            "INSERT INTO pages (book_id, page_num, page_image_uri, docling_md, metadata,"
+            " pooled, kb_version, embed_model)"
+            " VALUES ($1, 0, 'bench', 'bench', '{}'::jsonb, $2::halfvec, 1, 'bench')",
+            BOOK_ID, _vec_text(99),
+        )
+
+    # pages: kb_version >= 1（0 應被 CHECK 擋）
+    with pytest.raises(asyncpg.CheckViolationError):
+        await conn.execute(
+            "INSERT INTO pages (book_id, page_num, page_image_uri, docling_md, metadata,"
+            " pooled, kb_version, embed_model)"
+            " VALUES ($1, 1, 'bench', 'bench', '{}'::jsonb, $2::halfvec, 0, 'bench')",
+            BOOK_ID, _vec_text(99),
+        )
+
+    # page_patches: patch_idx >= 0（-1 應被 CHECK 擋）；先建一個合法 page
+    pid = await conn.fetchval(
+        "INSERT INTO pages (book_id, page_num, page_image_uri, docling_md, metadata,"
+        " pooled, kb_version, embed_model)"
+        " VALUES ($1, 1, 'bench', 'bench', '{}'::jsonb, $2::halfvec, 1, 'bench')"
+        " RETURNING page_id",
+        BOOK_ID, _vec_text(99),
+    )
+    with pytest.raises(asyncpg.CheckViolationError):
+        await conn.execute(
+            "INSERT INTO page_patches VALUES (1, $1, -1, $2::text::bit(128))",
+            pid, "0" * 128,
+        )
+
+    # ingest_errors: stage 必須在合法列舉內（'unknown' 應被 CHECK 擋）
+    with pytest.raises(asyncpg.CheckViolationError):
+        await conn.execute(
+            "INSERT INTO ingest_errors (kb_version, book_id, page_num, stage, error_type, message)"
+            " VALUES (1, $1, 1, 'unknown', 'ValueError', 'bad stage')",
+            BOOK_ID,
+        )
+
+
 async def test_tsvector_generated_and_cosine_query(clean_db):
     conn = clean_db
     await ensure_kb_partition(conn, 1)

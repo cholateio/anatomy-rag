@@ -11,10 +11,11 @@ def upgrade() -> None:
     op.execute("""
         CREATE TABLE ingest_errors (
             error_id    BIGSERIAL PRIMARY KEY,
-            kb_version  INTEGER NOT NULL,
+            kb_version  INTEGER NOT NULL CHECK (kb_version >= 1),
             book_id     UUID REFERENCES books(book_id),
-            page_num    INTEGER,                       -- NULL = 整書層級失敗
-            stage       TEXT NOT NULL,                 -- parse|render|encode|upload|write
+            page_num    INTEGER CHECK (page_num IS NULL OR page_num >= 1),
+            stage       TEXT NOT NULL                    -- parse|render|encode|upload|write
+                         CHECK (stage IN ('parse', 'render', 'encode', 'upload', 'write')),
             error_type  TEXT NOT NULL,                 -- 例外類別名
             message     TEXT NOT NULL,
             detail      JSONB NOT NULL DEFAULT '{}',   -- traceback 摘要 / batch 資訊

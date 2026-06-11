@@ -18,9 +18,9 @@ depends_on = None
 def upgrade() -> None:
     op.execute("""
         CREATE TABLE page_patches (
-            kb_version  INTEGER NOT NULL,
+            kb_version  INTEGER NOT NULL CHECK (kb_version >= 1),
             page_id     UUID NOT NULL,
-            patch_idx   INTEGER NOT NULL,
+            patch_idx   INTEGER NOT NULL CHECK (patch_idx >= 0),
             patch_bin   BIT(128) NOT NULL,
             PRIMARY KEY (kb_version, page_id, patch_idx),
             FOREIGN KEY (kb_version, page_id)

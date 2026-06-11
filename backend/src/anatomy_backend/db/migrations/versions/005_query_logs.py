@@ -23,8 +23,8 @@ def upgrade() -> None:
             answer          TEXT,
             feedback        SMALLINT CHECK (feedback IN (-1, 0, 1)),
             feedback_text   TEXT,                      -- §6.5 MUST：👍/👎 附文字回饋
-            latency_ms      INTEGER,
-            kb_version      INTEGER,
+            latency_ms      INTEGER CHECK (latency_ms IS NULL OR latency_ms >= 0),
+            kb_version      INTEGER CHECK (kb_version IS NULL OR kb_version >= 1),
             status          TEXT NOT NULL DEFAULT 'ok'
                              CHECK (status IN ('ok', 'llm_error', 'encoder_error',
                                                'retrieval_error', 'cancelled')),

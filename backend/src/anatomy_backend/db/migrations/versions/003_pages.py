@@ -12,14 +12,14 @@ def upgrade() -> None:
         CREATE TABLE pages (
             page_id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             book_id         UUID NOT NULL REFERENCES books(book_id),
-            page_num        INTEGER NOT NULL,
+            page_num        INTEGER NOT NULL CHECK (page_num >= 1),
             page_image_uri  TEXT NOT NULL,
             docling_md      TEXT NOT NULL,
             metadata        JSONB NOT NULL DEFAULT '{}',
             pooled          HALFVEC(128) NOT NULL,
             text_tsv        TSVECTOR
                              GENERATED ALWAYS AS (to_tsvector('simple', docling_md)) STORED,
-            kb_version      INTEGER NOT NULL,
+            kb_version      INTEGER NOT NULL CHECK (kb_version >= 1),
             embed_model     TEXT NOT NULL,
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             UNIQUE (book_id, page_num, kb_version),

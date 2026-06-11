@@ -80,6 +80,18 @@ class Settings(BaseSettings):
             )
         return v
 
+    @field_validator("pg_direct_url")
+    @classmethod
+    def _must_use_postgres_direct(cls, v: str) -> str:
+        """解析 DSN port：migrations 專用連線必須直連 Postgres :5432（§0.3）。"""
+        port = urlparse(v).port
+        if port != 5432:
+            raise ValueError(
+                f"PG_DIRECT_URL 必須直連 Postgres :5432（migrations 唯一例外）；"
+                f"不可指向 PgBouncer :6432（目前 port={port}）"
+            )
+        return v
+
 
 _settings: Settings | None = None
 

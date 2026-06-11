@@ -11,6 +11,7 @@
 import asyncio
 import os
 from logging.config import fileConfig
+from urllib.parse import urlparse
 
 from alembic import context
 from sqlalchemy import pool
@@ -43,6 +44,12 @@ def _get_pg_direct_url() -> str:
         raise RuntimeError(
             "Alembic 需要 PG_DIRECT_URL"
             "（直連 Postgres :5432 的 migrations 專用連線，§0.3 例外）"
+        )
+    port = urlparse(url).port
+    if port != 5432:
+        raise RuntimeError(
+            f"PG_DIRECT_URL 必須直連 Postgres :5432（migrations 唯一例外）；"
+            f"不可指向 PgBouncer :6432（目前 port={port}）"
         )
     # 本專案單一 postgres 驅動 = asyncpg（不引入 psycopg2）；SQLAlchemy 需明確指定方言。
     # .env 的 PG_DIRECT_URL 維持泛用 postgresql://，此處正規化為 +asyncpg。

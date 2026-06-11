@@ -17,7 +17,7 @@ def _fetchval(sql: str):
     import asyncpg
 
     async def go():
-        conn = await asyncpg.connect(os.environ["PG_DIRECT_URL"], statement_cache_size=0)
+        conn = await asyncpg.connect(os.environ["DATABASE_URL"], statement_cache_size=0)
         try:
             return await conn.fetchval(sql)
         finally:

@@ -130,7 +130,10 @@ make lint    # ruff check .
 export PGPW=$(grep -E "^POSTGRES_PASSWORD=" .env | cut -d= -f2)
 export DATABASE_URL="postgresql://anatomy:${PGPW}@localhost:6432/anatomy_rag"
 export PG_DIRECT_URL="postgresql://anatomy:${PGPW}@localhost:5432/anatomy_rag"
+export ANATOMY_DB_TESTS_ALLOW_DESTRUCTIVE=1
 ```
+
+> ⚠️ **注意**：`ANATOMY_DB_TESTS_ALLOW_DESTRUCTIVE=1` 允許測試對目標 DB 執行 TRUNCATE 與 downgrade/upgrade——**只對可拋棄的 dev/CI DB 設這個旗標**；若 DB 名稱以 `_test` 結尾則免設（conftest 自動放行）。
 
 執行 DB 整合測試：
 

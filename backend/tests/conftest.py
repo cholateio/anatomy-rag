@@ -3,9 +3,14 @@
 db 標記測試需要 DATABASE_URL（:6432 經 PgBouncer）+ PG_DIRECT_URL（:5432，僅 alembic）。
 兩者未設定時自動 skip——unit job 與裸 `make test`（無 compose）不受影響；
 CI db-integration job 與本機 compose 環境會真跑。
+
+destructive 守門：db 測試會 TRUNCATE 與 downgrade 整個目標資料庫；
+DB 名稱須以 _test 結尾，或設 ANATOMY_DB_TESTS_ALLOW_DESTRUCTIVE=1 明示目標 DB 可拋棄
+（CI / 本機 dev sandbox）。詳見 pytest_configure 內的說明。
 """
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
@@ -19,6 +24,18 @@ def pytest_configure(config):
     # 不允許 db 測試整批 skip 還回綠燈（假綠防呆，Codex 審查 MEDIUM）
     if os.environ.get("REQUIRE_DB_TESTS") == "1" and not _DB_ENV_READY:
         raise pytest.UsageError("REQUIRE_DB_TESTS=1 但缺 DATABASE_URL / PG_DIRECT_URL")
+
+    # destructive 守門：防止 db 測試誤射生產或共用 DB
+    if _DB_ENV_READY:
+        db_name = urlparse(os.environ["DATABASE_URL"]).path.lstrip("/")
+        if not db_name.endswith("_test") and (
+            os.environ.get("ANATOMY_DB_TESTS_ALLOW_DESTRUCTIVE") != "1"
+        ):
+            raise pytest.UsageError(
+                "db 測試會 TRUNCATE 與 downgrade 整個目標資料庫；"
+                "DB 名稱須以 _test 結尾，或設 ANATOMY_DB_TESTS_ALLOW_DESTRUCTIVE=1"
+                " 明示目標 DB 可拋棄（CI / 本機 dev sandbox）"
+            )
 
 
 def pytest_collection_modifyitems(config, items):

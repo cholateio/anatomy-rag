@@ -64,7 +64,7 @@ async def test_stage_a_query_fills_topk_across_versions(pool):
             rows = [
                 (book, n, "s3://x.png", f"page {n}", json.dumps({}), vec(), kb, "colpali-v1.3-hf")
                 for kb in (1, 2)
-                for n in range(120)
+                for n in range(1, 121)  # page_num >= 1（Fix E CHECK 約束）
             ]
             await conn.executemany(
                 "INSERT INTO pages (book_id, page_num, page_image_uri, docling_md, metadata,"

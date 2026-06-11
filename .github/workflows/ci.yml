@@ -62,9 +62,7 @@ jobs:
         run: |
           out=$(PGPASSWORD=anatomy_dev_pw psql -h localhost -p 6432 -U anatomy -d anatomy_rag -tAc 'SELECT current_database()')
           test "$out" = "anatomy_rag" || (echo "PgBouncer 代理失敗: got '$out'" && exit 1)
-      - name: 建擴充（CI 無 init.sql 掛載）
-        run: PGPASSWORD=anatomy_dev_pw psql -h localhost -U anatomy -d anatomy_rag -c "CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pg_trgm;"
-      - name: Alembic migrations（Phase 0 為框架驗證 no-op；Phase 2 起有內容）
+      - name: Alembic migrations（migration 001 負責建 extensions；Phase 2 起有完整內容）
         env: { PG_DIRECT_URL: postgresql://anatomy:anatomy_dev_pw@localhost:5432/anatomy_rag }
         run: cd backend && uv run --no-sync alembic -c alembic.ini upgrade head
       - name: DB 整合測試（Phase 2 起生效）
@@ -73,6 +71,7 @@ jobs:
           PG_DIRECT_URL: postgresql://anatomy:anatomy_dev_pw@localhost:5432/anatomy_rag
           REDIS_URL: redis://localhost:6379/0
           REQUIRE_DB_TESTS: "1"                  # conftest guard 用；防止 env 漏傳導致整批 skip 假綠
+          ANATOMY_DB_TESTS_ALLOW_DESTRUCTIVE: "1"  # CI DB 為可拋棄環境；允許 TRUNCATE/downgrade
         run: uv run --no-sync pytest backend/tests -q -m "db or integration"
 
   gitleaks:
