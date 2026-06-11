@@ -104,3 +104,94 @@ async def test_hamming_operator_matches_shared_oracle(db_conn):
             "SELECT $1::text::bit(128) <~> $2::text::bit(128)", to_pg_bits(a), to_pg_bits(b)
         )
         assert int(sql_dist) == hamming_distance(a, b)
+
+
+async def test_query_logs_inference_and_client_columns(clean_db):
+    """DL-022：每回合一列，含 client 脈絡與 inference 用量。"""
+    conn = clean_db
+    log_id = await conn.fetchval(
+        "INSERT INTO query_logs (user_id, conversation_id, query_text, retrieved, answer,"
+        " feedback, feedback_text, latency_ms, kb_version, status, cache_hit, model_used,"
+        " tool_used, tokens_in, tokens_out, cost_usd, ip, country, user_agent)"
+        " VALUES ($1, $2, '肱二頭肌起止點?', $3::jsonb, '…', 1, '引文頁碼正確', 1234, 1,"
+        " 'ok', FALSE, 'gpt-5.5', $4::jsonb, 1500, 320, 0.012345, $5::inet, 'TW',"
+        " 'Mozilla/5.0')"
+        " RETURNING log_id",
+        uuid.uuid4(), uuid.uuid4(),
+        json.dumps([{"page_id": "x", "score": 0.9}]), json.dumps(["retrieval"]),
+        "140.112.1.1",
+    )
+    row = await conn.fetchrow("SELECT * FROM query_logs WHERE log_id=$1", log_id)
+    assert row["model_used"] == "gpt-5.5"
+    assert row["feedback"] == 1 and row["feedback_text"] == "引文頁碼正確"  # §6.5
+    assert row["tokens_in"] == 1500 and row["tokens_out"] == 320
+    assert float(row["cost_usd"]) == pytest.approx(0.012345)
+    assert str(row["ip"]) == "140.112.1.1" and row["country"] == "TW"
+    assert row["clinical_flavored"] is False  # §6.7 預設關閉
+
+
+async def test_query_logs_quality_checks(clean_db):
+    """資料品質 CHECK（DL-022）：呼叫端餵錯值要在 DB 層被擋，否則成本/觀測資料不可分析。"""
+    import asyncpg
+
+    bad_inserts = [
+        "INSERT INTO query_logs (user_id, query_text, feedback) VALUES ($1, 'q', 2)",
+        "INSERT INTO query_logs (user_id, query_text, country) VALUES ($1, 'q', 'Taiwan')",
+        "INSERT INTO query_logs (user_id, query_text, tokens_in) VALUES ($1, 'q', -5)",
+        "INSERT INTO query_logs (user_id, query_text, cost_usd) VALUES ($1, 'q', -0.01)",
+        "INSERT INTO query_logs (user_id, query_text, status) VALUES ($1, 'q', 'whatever')",
+    ]
+    for sql in bad_inserts:
+        with pytest.raises(asyncpg.CheckViolationError):
+            await clean_db.execute(sql, uuid.uuid4())
+
+
+async def test_ingest_errors_unresolved_lookup(clean_db):
+    conn = clean_db
+    await conn.execute(
+        "INSERT INTO books (book_id, title) VALUES ($1, 'Gray''s') ON CONFLICT DO NOTHING",
+        BOOK_ID,
+    )
+    await conn.execute(
+        "INSERT INTO ingest_errors (kb_version, book_id, page_num, stage, error_type, message)"
+        " VALUES (1, $1, 812, 'encode', 'RuntimeError', 'CUDA OOM')",
+        BOOK_ID,
+    )
+    rows = await conn.fetch(
+        "SELECT page_num, stage FROM ingest_errors WHERE kb_version=1 AND NOT resolved"
+    )
+    assert [(r["page_num"], r["stage"]) for r in rows] == [(812, "encode")]
+
+
+async def test_required_indexes_exist(db_conn):
+    """§3.3 + DL-022 索引齊全；HNSW 用 halfvec_cosine_ops（DL-019）。"""
+    names = {
+        r["indexname"]
+        for r in await db_conn.fetch("SELECT indexname FROM pg_indexes WHERE schemaname='public'")
+    }
+    for expected in [
+        "pages_pooled_hnsw", "pages_meta_gin", "pages_tsv_gin", "pages_kb_version",
+        "query_logs_created", "query_logs_user", "query_logs_ip", "ingest_errors_kb",
+    ]:
+        assert expected in names, f"缺索引 {expected}"
+    hnsw_def = await db_conn.fetchval(
+        "SELECT indexdef FROM pg_indexes WHERE indexname='pages_pooled_hnsw'"
+    )
+    assert "hnsw" in hnsw_def and "halfvec_cosine_ops" in hnsw_def
+
+
+async def test_tsvector_generated_and_cosine_query(clean_db):
+    conn = clean_db
+    await ensure_kb_partition(conn, 1)
+    pid = await _seed_book_and_page(conn, page_num=3, kb_version=1, md="deltoid insertion humerus")
+    hit = await conn.fetchval(
+        "SELECT page_id FROM pages WHERE kb_version=1"
+        " AND text_tsv @@ plainto_tsquery('simple', 'deltoid')"
+    )
+    assert hit == pid
+    top = await conn.fetchval(
+        "SELECT page_id FROM pages WHERE kb_version=1"
+        " ORDER BY pooled <=> $1::halfvec LIMIT 1",
+        _vec_text(3),  # 與該頁 pooled 同 seed → cosine 距離最小
+    )
+    assert top == pid
