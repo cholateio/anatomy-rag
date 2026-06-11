@@ -74,9 +74,22 @@ async def test_stage_a_query_fills_topk_across_versions(pool):
     async with hnsw_search_txn(pool, ef_search=100) as conn:
         # 小資料集 planner 會偏好 seq scan（那就測不到索引行為）；強制走 HNSW
         await conn.execute("SET LOCAL enable_seqscan = off")
+        # 逼出 HNSW index scan；否則 planner 走 sort，iterative_scan 失效
+        await conn.execute("SET LOCAL enable_sort = off")
+        q = vec()
+        # 計畫斷言：確認 planner 走 HNSW 索引路徑
+        plan_rows = await conn.fetch(
+            "EXPLAIN (FORMAT TEXT) SELECT page_id FROM pages WHERE kb_version = 1"
+            " ORDER BY pooled <=> $1::halfvec LIMIT 100",
+            q,
+        )
+        plan_text = "\n".join(r[0] for r in plan_rows)
+        assert "pages_pooled_hnsw" in plan_text, (
+            f"期望 planner 走 pages_pooled_hnsw，實際計畫：\n{plan_text}"
+        )
         hits = await conn.fetch(
             "SELECT page_id FROM pages WHERE kb_version = 1"
             " ORDER BY pooled <=> $1::halfvec LIMIT 100",
-            vec(),
+            q,
         )
     assert len(hits) == 100  # 非 iterative 模式下雙版本約只回 ~50 筆
