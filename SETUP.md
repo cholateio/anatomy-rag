@@ -111,6 +111,53 @@ make lint    # ruff check .
 - ✅ **成功應看到**：pytest 全綠、ruff `All checks passed!`。
 - 📝 為什麼是 `make test` 而不是直接 `uv run pytest`？因為本 workspace 的 root 專案不依賴各成員套件，`uv run`／`uv sync` 預設會**剪除**成員套件導致 import 失敗；`make test` 已封裝正確配方（`uv sync --all-packages` + `uv run --no-sync`）。直接下指令時請比照。
 
+### A.8 DB 整合測試與 Stage B bench（Phase 2 起）
+
+#### A.8.1 本機跑 DB 整合測試
+
+**前置**：`make up`（至少 `postgres` + `pgbouncer` 皆 healthy）與 `make migrate`（已建好 Phase 2 資料表）。
+
+> **⚠️ Image 重建提醒**：backend 程式碼已烤進 Docker image。若修改了 `backend/` 或 `migrations/` 的程式碼，需先重建再 migrate：
+> ```bash
+> docker compose build backend
+> make migrate
+> ```
+> 否則容器內跑的仍是舊程式碼。
+
+匯出連線環境變數（密碼從 `.env` 讀取，不用手動複製貼上）：
+
+```bash
+export PGPW=$(grep -E "^POSTGRES_PASSWORD=" .env | cut -d= -f2)
+export DATABASE_URL="postgresql://anatomy:${PGPW}@localhost:6432/anatomy_rag"
+export PG_DIRECT_URL="postgresql://anatomy:${PGPW}@localhost:5432/anatomy_rag"
+```
+
+執行 DB 整合測試：
+
+```bash
+uv run --no-sync pytest backend/tests -q -m db   # 只跑 db marker
+# 或
+uv run --no-sync pytest backend/tests -q          # 跑全套（unit + db）
+```
+
+- ✅ **成功應看到**：全綠（目前 38 tests：unit + db）。
+- 📝 **未設環境變數時 db 測試會自動 skip**，unit job 與裸 `make test` 不受影響。CI 的 `db-integration` job 設有 `REQUIRE_DB_TESTS=1`；若環境變數漏傳，該 job 會直接 fail（而非假裝全過）。
+
+#### A.8.2 Stage B 延遲探針（`make bench-stageb`）
+
+用途：驗證 DL-013 規定的 **200 ms 兩階段總延遲預算**（Stage B MaxSim 精排部分的單連線 microbenchmark；此為非正式探針，正式 gate 於 Phase 5 完成）。
+
+**前置**：已匯出 §A.8.1 的三個環境變數，且 `make migrate` 已執行。
+
+```bash
+make bench-stageb
+```
+
+腳本會自動：seeding 2000 頁 × 1024 patches 的合成資料（約需數分鐘）→ 執行延遲量測 → 輸出 JSON 報告 → **清除合成資料**（`kb_version=999`）。
+
+- ✅ **成功應看到**：JSON 報告含 `p50 / p95 / max / budget_ms` 欄位。2026-06-11 WSL2 實測參考值：**p50 ≈ 157 ms / p95 ≈ 161 ms**，均在 200 ms 預算內。
+- 📝 合成資料用獨立的 `kb_version=999`，不污染正式知識庫資料；benchmark 結束後自動刪除，不需手動清理。
+
 ---
 
 ## §B 生產 / GPU 路徑（接真實 ColPali encoder 與 OpenAI）
