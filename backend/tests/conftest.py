@@ -69,7 +69,8 @@ async def clean_db(db_conn):
 
     books CASCADE 沿 FK 連到 pages → page_patches 各分區；
     query_logs 無 FK chain from books，必須明列；
-    ingest_errors.book_id FK books，CASCADE 已涵蓋，但明列確保順序安全。
+    ingest_errors.book_id FK books，CASCADE 已涵蓋，但明列以確保 RESTART IDENTITY 明確性
+    （ingest_errors 本可由 books CASCADE 觸及）。
     """
     await db_conn.execute(
         "TRUNCATE books, query_logs, ingest_errors RESTART IDENTITY CASCADE"

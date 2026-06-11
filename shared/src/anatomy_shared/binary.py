@@ -28,6 +28,10 @@ def to_pg_bits(data: bytes) -> str:
     PostgreSQL 沒有 bytea→bit 的 cast；SQL 綁定（§4.4 Stage B）一律經本函式轉成
     text 再 `::bit(128)`。位序與 binarize 的 np.packbits（MSB-first）為同一約定，
     集中在本檔以免離線端與 query 端各自轉換而漂移。
+
+    asyncpg 綁定注意：純量 str 參數 MUST 寫 `$N::text::bit(128)`——bare `$N::bit(128)` 會讓
+    asyncpg 對 str 套 bit codec 而報錯（需 bytes/BitString）。§4.4 Stage B 的
+    `unnest($1::text[])` 路徑因元素已是 text 型別，單層 `::bit(128)` 即可。
     """
     return "".join(f"{byte:08b}" for byte in data)
 

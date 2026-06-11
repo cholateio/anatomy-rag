@@ -56,13 +56,16 @@ async def test_partition_routing_per_kb_version(clean_db):
 
 async def test_insert_without_partition_fails_fast(clean_db):
     conn = clean_db
-    pid = await _seed_book_and_page(conn, page_num=9, kb_version=3)  # pages 不分區，可插
+    # 998 保留為『永不建分區』哨兵（bench 用 999；一般測試用小版本號）
+    # ——若未來有測試建了 998 分區，本測試會誤失敗
+    await conn.execute("DROP TABLE IF EXISTS page_patches_v998")
+    pid = await _seed_book_and_page(conn, page_num=9, kb_version=998)  # pages 不分區，可插
     import asyncpg
 
-    # v3 分區未建：PostgreSQL 拋 SQLSTATE 23514（no partition of relation … found for row）
+    # v998 分區未建：PostgreSQL 拋 SQLSTATE 23514（no partition of relation … found for row）
     with pytest.raises(asyncpg.CheckViolationError) as exc:
         await conn.execute(
-            "INSERT INTO page_patches VALUES (3, $1, 0, $2::text::bit(128))",
+            "INSERT INTO page_patches VALUES (998, $1, 0, $2::text::bit(128))",
             pid, "0" * 128,
         )
     assert exc.value.sqlstate == "23514"
@@ -135,15 +138,31 @@ async def test_query_logs_quality_checks(clean_db):
     import asyncpg
 
     bad_inserts = [
-        "INSERT INTO query_logs (user_id, query_text, feedback) VALUES ($1, 'q', 2)",
-        "INSERT INTO query_logs (user_id, query_text, country) VALUES ($1, 'q', 'Taiwan')",
-        "INSERT INTO query_logs (user_id, query_text, tokens_in) VALUES ($1, 'q', -5)",
-        "INSERT INTO query_logs (user_id, query_text, cost_usd) VALUES ($1, 'q', -0.01)",
-        "INSERT INTO query_logs (user_id, query_text, status) VALUES ($1, 'q', 'whatever')",
+        (
+            "INSERT INTO query_logs (user_id, query_text, feedback) VALUES ($1, 'q', 2)",
+            "query_logs_feedback_check",
+        ),
+        (
+            "INSERT INTO query_logs (user_id, query_text, country) VALUES ($1, 'q', 'Taiwan')",
+            "query_logs_country_check",
+        ),
+        (
+            "INSERT INTO query_logs (user_id, query_text, tokens_in) VALUES ($1, 'q', -5)",
+            "query_logs_tokens_in_check",
+        ),
+        (
+            "INSERT INTO query_logs (user_id, query_text, cost_usd) VALUES ($1, 'q', -0.01)",
+            "query_logs_cost_usd_check",
+        ),
+        (
+            "INSERT INTO query_logs (user_id, query_text, status) VALUES ($1, 'q', 'whatever')",
+            "query_logs_status_check",
+        ),
     ]
-    for sql in bad_inserts:
-        with pytest.raises(asyncpg.CheckViolationError):
+    for sql, expected_constraint in bad_inserts:
+        with pytest.raises(asyncpg.CheckViolationError) as exc:
             await clean_db.execute(sql, uuid.uuid4())
+        assert exc.value.constraint_name == expected_constraint
 
 
 async def test_ingest_errors_unresolved_lookup(clean_db):
@@ -184,6 +203,8 @@ async def test_tsvector_generated_and_cosine_query(clean_db):
     conn = clean_db
     await ensure_kb_partition(conn, 1)
     pid = await _seed_book_and_page(conn, page_num=3, kb_version=1, md="deltoid insertion humerus")
+    # 第二筆：不含 deltoid，確保 cosine 排名有兩筆候選才具意義
+    await _seed_book_and_page(conn, page_num=4, kb_version=1, md="scapula notes")
     hit = await conn.fetchval(
         "SELECT page_id FROM pages WHERE kb_version=1"
         " AND text_tsv @@ plainto_tsquery('simple', 'deltoid')"
@@ -192,6 +213,6 @@ async def test_tsvector_generated_and_cosine_query(clean_db):
     top = await conn.fetchval(
         "SELECT page_id FROM pages WHERE kb_version=1"
         " ORDER BY pooled <=> $1::halfvec LIMIT 1",
-        _vec_text(3),  # 與該頁 pooled 同 seed → cosine 距離最小
+        _vec_text(3),  # 與該頁 pooled 同 seed → cosine 距離最小（兩筆候選中排第一）
     )
     assert top == pid
