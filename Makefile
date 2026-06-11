@@ -1,10 +1,11 @@
-.PHONY: help up up-gpu up-obs down logs migrate gpu-smoke golden-bytes ingest-sample test lint fmt
+.PHONY: help up up-gpu up-obs down logs migrate gpu-smoke golden-bytes ingest-sample bench-stageb test lint fmt
 
 help:
 	@echo "make up / up-gpu / up-obs / down / logs"
 	@echo "make migrate      # 在 backend container 內跑 Alembic（連 PG_DIRECT_URL :5432，§0.3 例外）"
 	@echo "make gpu-smoke    # 實機 GPU：build GPU encoder 並驗 torch.cuda.is_available()"
 	@echo "make golden-bytes # 產生 Vercel UI Message Stream golden wire bytes"
+	@echo "make bench-stageb  # Stage B MaxSim 延遲探針（手動；需 compose 起 DB + 已 migrate；DL-013，非 CI gate）"
 	@echo "make test / lint / fmt / ingest-sample"
 
 up:
@@ -39,6 +40,11 @@ golden-bytes:
 # 佔位（Phase 2+ ingest CLI 與樣本資料就緒後生效；需 ingest 映像或於 GPU 主機執行）。
 ingest-sample:
 	docker compose run --rm backend sh -c "uv run python -m anatomy_ingest.cli --pdf /data/sample.pdf --book-meta /data/sample.yaml --kb-version 1 --batch-size 4"
+
+# Stage B MaxSim 延遲探針（手動；需 compose 起 DB + 已 migrate；DL-013，非 CI gate）
+bench-stageb:
+	uv sync --package anatomy-backend --inexact
+	uv run --no-sync python backend/scripts/bench_stage_b.py
 
 # 本機測試：先同步全部 workspace 成員（避免 uv run 預設剪除成員），再以 --no-sync 跑。
 # 註：首次會安裝 ingest/encoder 的完整依賴（含 torch），之後快取於 .venv。
