@@ -40,10 +40,14 @@ jobs:
           POSTGRESQL_USERNAME: anatomy
           POSTGRESQL_PASSWORD: anatomy_dev_pw
           POSTGRESQL_DATABASE: anatomy_rag
+          PGBOUNCER_DATABASE: anatomy_rag        # 顯式暴露 anatomy_rag（bitnami 預設只暴露 postgres 別名）
           PGBOUNCER_PORT: 6432
           PGBOUNCER_POOL_MODE: transaction
           PGBOUNCER_AUTH_TYPE: scram-sha-256
         ports: ["6432:6432"]
+        options: >-
+          --health-cmd "PGPASSWORD=anatomy_dev_pw psql -h 127.0.0.1 -p 6432 -U anatomy -d anatomy_rag -tAc 'SELECT 1'"
+          --health-interval 5s --health-timeout 3s --health-retries 10
       redis:
         image: redis:7-alpine
         ports: ["6379:6379"]
@@ -54,22 +58,22 @@ jobs:
       - run: uv sync --package anatomy-backend --inexact
       - name: 安裝 psql client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: 驗證 PgBouncer 代理路徑（:6432 → postgres）
+        run: |
+          out=$(PGPASSWORD=anatomy_dev_pw psql -h localhost -p 6432 -U anatomy -d anatomy_rag -tAc 'SELECT current_database()')
+          test "$out" = "anatomy_rag" || (echo "PgBouncer 代理失敗: got '$out'" && exit 1)
       - name: 建擴充（CI 無 init.sql 掛載）
         run: PGPASSWORD=anatomy_dev_pw psql -h localhost -U anatomy -d anatomy_rag -c "CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pg_trgm;"
       - name: Alembic migrations（Phase 0 為框架驗證 no-op；Phase 2 起有內容）
         env: { PG_DIRECT_URL: postgresql://anatomy:anatomy_dev_pw@localhost:5432/anatomy_rag }
         run: cd backend && uv run --no-sync alembic -c alembic.ini upgrade head
-      - name: DB 整合測試（Phase 2 起生效；Phase 0 無 db 標記測試）
+      - name: DB 整合測試（Phase 2 起生效）
         env:
           DATABASE_URL: postgresql://anatomy:anatomy_dev_pw@localhost:6432/anatomy_rag
           PG_DIRECT_URL: postgresql://anatomy:anatomy_dev_pw@localhost:5432/anatomy_rag
           REDIS_URL: redis://localhost:6379/0
-        run: |
-          uv run --no-sync pytest backend/tests -q -m "db or integration"; rc=$?
-          # 只容忍 pytest exit 5（未收集到測試；Phase 0 尚無 db/integration 標記）；
-          # 其餘非零（真實失敗 / 崩潰 / 收集錯誤）一律讓 job 失敗，不得遮蔽（Phase 2 起生效）。
-          if [ "$rc" = "5" ]; then echo "Phase 0 無 db/integration 測試（exit 5 = no tests collected）"; exit 0; fi
-          exit "$rc"
+          REQUIRE_DB_TESTS: "1"                  # conftest guard 用；防止 env 漏傳導致整批 skip 假綠
+        run: uv run --no-sync pytest backend/tests -q -m "db or integration"
 
   gitleaks:
     runs-on: ubuntu-latest
