@@ -65,6 +65,8 @@ async def db_conn(migrated_db):
 
 @pytest.fixture
 async def clean_db(db_conn):
-    """每測試前清空資料（TRUNCATE 沿 FK 連到 pages 與 page_patches 各分區）。"""
-    await db_conn.execute("TRUNCATE books, query_logs, ingest_errors RESTART IDENTITY CASCADE")
+    """每測試前清空資料（TRUNCATE books CASCADE 沿 FK 連到 pages 與 page_patches 各分區）。
+    Task 6 追加 query_logs / ingest_errors 後，直接加進 TRUNCATE 清單即可。
+    """
+    await db_conn.execute("TRUNCATE books RESTART IDENTITY CASCADE")
     return db_conn

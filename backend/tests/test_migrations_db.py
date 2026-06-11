@@ -10,8 +10,8 @@ from alembic import command
 
 pytestmark = pytest.mark.db
 
-# Task 5/6 會把 page_patches / query_logs / ingest_errors 追加進來（隨 migration 鏈成長）
-TABLES = ["books", "pages"]
+# Task 6 會把 query_logs / ingest_errors 追加進來（隨 migration 鏈成長）
+TABLES = ["books", "pages", "page_patches"]
 
 
 def _fetchval(sql: str):
