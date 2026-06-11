@@ -31,7 +31,10 @@ async def create_pool(settings: Settings | None = None) -> asyncpg.Pool:
 
 
 async def get_pool() -> asyncpg.Pool:
-    """應用層共享單例（lazy；首呼叫建立）。"""
+    """應用層共享單例（lazy；首呼叫建立）。
+
+    單例綁定首個呼叫它的 event loop；測試請用 create_pool() 注入、不要碰單例。
+    """
     global _pool
     if _pool is None:
         async with _pool_lock:
@@ -40,6 +43,7 @@ async def get_pool() -> asyncpg.Pool:
     return _pool
 
 
+# 不持 _pool_lock：close 僅於 lifespan shutdown（嚴格時序）呼叫，與 get_pool 不併發。
 async def close_pool() -> None:
     global _pool
     if _pool is not None:

@@ -55,41 +55,45 @@ async def test_stage_a_query_fills_topk_across_versions(pool):
     def vec() -> str:
         return "[" + ",".join(f"{x:.4f}" for x in rng.standard_normal(128)) + "]"
 
-    async with pool.acquire() as conn:
-        await conn.execute("TRUNCATE books RESTART IDENTITY CASCADE")
-        book = await conn.fetchval(
-            "INSERT INTO books (title) VALUES ('topk-fill') RETURNING book_id"
-        )
-        rows = [
-            (book, n, "s3://x.png", f"page {n}", json.dumps({}), vec(), kb, "colpali-v1.3-hf")
-            for kb in (1, 2)
-            for n in range(120)
-        ]
-        await conn.executemany(
-            "INSERT INTO pages (book_id, page_num, page_image_uri, docling_md, metadata,"
-            " pooled, kb_version, embed_model)"
-            " VALUES ($1, $2, $3, $4, $5::jsonb, $6::halfvec, $7, $8)",
-            rows,
-        )
-    async with hnsw_search_txn(pool, ef_search=100) as conn:
-        # 小資料集 planner 會偏好 seq scan（那就測不到索引行為）；強制走 HNSW
-        await conn.execute("SET LOCAL enable_seqscan = off")
-        # 逼出 HNSW index scan；否則 planner 走 sort，iterative_scan 失效
-        await conn.execute("SET LOCAL enable_sort = off")
-        q = vec()
-        # 計畫斷言：確認 planner 走 HNSW 索引路徑
-        plan_rows = await conn.fetch(
-            "EXPLAIN (FORMAT TEXT) SELECT page_id FROM pages WHERE kb_version = 1"
-            " ORDER BY pooled <=> $1::halfvec LIMIT 100",
-            q,
-        )
-        plan_text = "\n".join(r[0] for r in plan_rows)
-        assert "pages_pooled_hnsw" in plan_text, (
-            f"期望 planner 走 pages_pooled_hnsw，實際計畫：\n{plan_text}"
-        )
-        hits = await conn.fetch(
-            "SELECT page_id FROM pages WHERE kb_version = 1"
-            " ORDER BY pooled <=> $1::halfvec LIMIT 100",
-            q,
-        )
-    assert len(hits) == 100  # 非 iterative 模式下雙版本約只回 ~50 筆
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("TRUNCATE books RESTART IDENTITY CASCADE")
+            book = await conn.fetchval(
+                "INSERT INTO books (title) VALUES ('topk-fill') RETURNING book_id"
+            )
+            rows = [
+                (book, n, "s3://x.png", f"page {n}", json.dumps({}), vec(), kb, "colpali-v1.3-hf")
+                for kb in (1, 2)
+                for n in range(120)
+            ]
+            await conn.executemany(
+                "INSERT INTO pages (book_id, page_num, page_image_uri, docling_md, metadata,"
+                " pooled, kb_version, embed_model)"
+                " VALUES ($1, $2, $3, $4, $5::jsonb, $6::halfvec, $7, $8)",
+                rows,
+            )
+        async with hnsw_search_txn(pool, ef_search=100) as conn:
+            # 小資料集 planner 會偏好 seq scan（那就測不到索引行為）；強制走 HNSW
+            await conn.execute("SET LOCAL enable_seqscan = off")
+            # 逼出 HNSW index scan；否則 planner 走 sort，iterative_scan 失效
+            await conn.execute("SET LOCAL enable_sort = off")
+            q = vec()
+            # 計畫斷言：確認 planner 走 HNSW 索引路徑
+            plan_rows = await conn.fetch(
+                "EXPLAIN (FORMAT TEXT) SELECT page_id FROM pages WHERE kb_version = 1"
+                " ORDER BY pooled <=> $1::halfvec LIMIT 100",
+                q,
+            )
+            plan_text = "\n".join(r[0] for r in plan_rows)
+            assert "pages_pooled_hnsw" in plan_text, (
+                f"期望 planner 走 pages_pooled_hnsw，實際計畫：\n{plan_text}"
+            )
+            hits = await conn.fetch(
+                "SELECT page_id FROM pages WHERE kb_version = 1"
+                " ORDER BY pooled <=> $1::halfvec LIMIT 100",
+                q,
+            )
+        assert len(hits) == 100  # 非 iterative 模式下雙版本約只回 ~50 筆
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute("TRUNCATE books RESTART IDENTITY CASCADE")
