@@ -42,8 +42,26 @@ class Settings(BaseSettings):
     rate_limit_per_user_day: int = 300
     rate_limit_global_rps: int = 20
 
+    # 物件儲存（MinIO/S3；ingest 寫入、backend Phase 8 取頁圖）
+    s3_bucket: str = "anatomy-rag-pages"
+    s3_endpoint: str = "http://minio:9000"
+
+    # Eval LLM（獨立 key，與生產分離；附錄 A）
+    eval_openai_api_key: str = ""
+    eval_openai_model: str = "gpt-5.5"
+
+    # SSO（DL-016 暫緩；接回校內 SSO 時啟用）
+    sso_client_id: str = ""
+    sso_client_secret: str = ""
+    sso_discovery_url: str = ""
+
+    # §6.7 MAY 旗標（預設關閉）：第一人稱症狀類 query 的 log 標記
+    clinical_flavored_logging: bool = False
+
     # 觀測服務（選填）
     langfuse_host: str = ""
+    langfuse_public_key: str = ""
+    langfuse_secret_key: str = ""
     sentry_dsn: str = ""
 
     @field_validator("database_url")

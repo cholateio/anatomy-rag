@@ -38,3 +38,20 @@ def test_missing_required_database_url_fails_fast(monkeypatch):
         monkeypatch.setenv(k, v)
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def test_settings_has_appendix_a_fields(monkeypatch):
+    """附錄 A 變數必須有對應欄位；extra=ignore 會靜默吞掉沒宣告的 key（審查遺留項）。"""
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@pgbouncer:6432/db")
+    monkeypatch.setenv("PG_DIRECT_URL", "postgresql://u:p@postgres:5432/db")
+    monkeypatch.setenv("REDIS_URL", "redis://redis:6379/0")
+    monkeypatch.setenv("S3_BUCKET", "anatomy-rag-pages")
+    monkeypatch.setenv("EVAL_OPENAI_API_KEY", "sk-eval-test")
+    s = Settings(_env_file=None)
+    assert s.s3_bucket == "anatomy-rag-pages"
+    assert s.s3_endpoint == "http://minio:9000"
+    assert s.eval_openai_api_key == "sk-eval-test"
+    assert s.eval_openai_model == "gpt-5.5"
+    assert s.langfuse_public_key == "" and s.langfuse_secret_key == ""
+    assert s.sso_client_id == "" and s.sso_discovery_url == ""
+    assert s.clinical_flavored_logging is False
