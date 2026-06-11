@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     pg_direct_url: str
     redis_url: str
 
+    # asyncpg pool 大小（§3.4 PgBouncer default_pool_size=25 上游守恆：max_size*workers ≤ 25）
+    db_pool_min_size: int = 2
+    db_pool_max_size: int = 10
+
     # OpenAI 設定（§0.3 DL-009：MUST 只用標準付費 API）
     openai_api_key: str = ""
     openai_model_primary: str = "gpt-5.5"
