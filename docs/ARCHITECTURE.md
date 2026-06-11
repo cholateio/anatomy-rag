@@ -341,7 +341,7 @@ python -m ingest.cli \
 
 ## 2.7 失敗處理
 
-- **MUST** 對單頁失敗保留 partial state 並記錄到 `ingest_errors` 表（schema 由實作 agent 設計）
+- **MUST** 對單頁失敗保留 partial state 並記錄到 `ingest_errors` 表（schema 見 §3.2，DL-022 定案）
 - **MUST** 提供 `--resume` 旗標從失敗頁繼續
 - **SHOULD** 寫入後抽樣校驗（隨機抽 5% 頁面，比對 `pages` 與 `page_patches` 計數）
 
@@ -361,6 +361,10 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 ```
 
 ## 3.2 Schema
+
+**表的雙分類**（維護導向，DL-022）：
+- 系統運作（檢索引擎資料，人不直接讀）：`pages`、`page_patches`
+- 人看的紀錄（稽核/維運/評估）：`books`、`query_logs`、`ingest_errors`
 
 ```sql
 CREATE TABLE books (
@@ -385,7 +389,8 @@ CREATE TABLE pages (                          -- 頁面層：Stage A 與 LLM pay
     kb_version      INTEGER NOT NULL,          -- 見 §6.6
     embed_model     TEXT NOT NULL,             -- 例：'colpali-v1.3-hf'
     created_at      TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE (book_id, page_num, kb_version)
+    UNIQUE (book_id, page_num, kb_version),
+    UNIQUE (kb_version, page_id)               -- 供 page_patches 複合 FK（版本一致性，DL-022 審查修訂）
 );
 
 CREATE TABLE page_patches (                    -- 區塊層：Stage B 用
@@ -394,20 +399,48 @@ CREATE TABLE page_patches (                    -- 區塊層：Stage B 用
     patch_idx   INTEGER NOT NULL,
     patch_bin   BIT(128) NOT NULL,
     PRIMARY KEY (kb_version, page_id, patch_idx),
-    FOREIGN KEY (page_id) REFERENCES pages(page_id) ON DELETE CASCADE
+    FOREIGN KEY (kb_version, page_id)          -- 複合 FK：防 v1 patch 指到 v2 page 的跨版本錯配
+        REFERENCES pages (kb_version, page_id) ON DELETE CASCADE
 ) PARTITION BY LIST (kb_version);              -- DL-010 分區（每 kb_version 一分區）
 
-CREATE TABLE query_logs (                      -- 觀測 / 評估用
-    log_id        BIGSERIAL PRIMARY KEY,
-    user_id       UUID NOT NULL,
+CREATE TABLE query_logs (                      -- 觀測 / 評估 / 回饋 + DL-022 inference/client 紀錄
+    log_id          BIGSERIAL PRIMARY KEY,
+    user_id         UUID NOT NULL,
     conversation_id UUID,                      -- DL-021：多輪分組（nullable，僅 logging/UX）
-    query_text    TEXT NOT NULL,
-    retrieved     JSONB,                       -- top-3 page_ids + scores
-    answer        TEXT,
-    feedback      SMALLINT,                    -- -1 / 0 / 1
-    latency_ms    INTEGER,
-    kb_version    INTEGER,
-    created_at    TIMESTAMPTZ DEFAULT NOW()
+    query_text      TEXT NOT NULL,
+    retrieved       JSONB,                     -- top-3 page_ids + scores
+    answer          TEXT,
+    feedback        SMALLINT CHECK (feedback IN (-1, 0, 1)),
+    feedback_text   TEXT,                      -- §6.5 MUST：👍/👎 附文字回饋
+    latency_ms      INTEGER,
+    kb_version      INTEGER,
+    status          TEXT NOT NULL DEFAULT 'ok'
+                     CHECK (status IN ('ok', 'llm_error', 'encoder_error',
+                                       'retrieval_error', 'cancelled')),
+    cache_hit       BOOLEAN NOT NULL DEFAULT FALSE,    -- 語意快取命中（命中時 model_used/tokens 為 NULL、cost=0）
+    model_used      TEXT,                              -- 實際出話模型（含 fallback 後）
+    tool_used       JSONB NOT NULL DEFAULT '[]',       -- 推理用到的工具名清單
+    tokens_in       INTEGER CHECK (tokens_in IS NULL OR tokens_in >= 0),
+    tokens_out      INTEGER CHECK (tokens_out IS NULL OR tokens_out >= 0),
+    cost_usd        NUMERIC(12, 6) CHECK (cost_usd IS NULL OR cost_usd >= 0),
+    ip              INET,
+    country         TEXT CHECK (country IS NULL OR country ~ '^[A-Z]{2}$'),  -- ISO 3166-1 alpha-2；本地 GeoIP 推導
+    user_agent      TEXT,                              -- 應用層截斷 ≤512
+    clinical_flavored BOOLEAN NOT NULL DEFAULT FALSE,  -- §6.7 MAY，預設關閉
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE ingest_errors (                   -- 建庫失敗紀錄（§2.6；schema 依 DL-022 授權由實作定案）
+    error_id    BIGSERIAL PRIMARY KEY,
+    kb_version  INTEGER NOT NULL,
+    book_id     UUID REFERENCES books(book_id),
+    page_num    INTEGER,                       -- NULL = 整書層級失敗
+    stage       TEXT NOT NULL,                 -- parse|render|encode|upload|write
+    error_type  TEXT NOT NULL,                 -- 例外類別名
+    message     TEXT NOT NULL,
+    detail      JSONB NOT NULL DEFAULT '{}',   -- traceback 摘要 / batch 資訊
+    resolved    BOOLEAN NOT NULL DEFAULT FALSE,-- 重跑成功後標記；--resume 跳過已 resolved
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ```
 
@@ -436,6 +469,8 @@ CREATE INDEX pages_tsv_gin    ON pages USING gin (text_tsv);   -- BM25 / tsvecto
 CREATE INDEX pages_kb_version ON pages (kb_version);           -- 版本切換查詢
 CREATE INDEX query_logs_created ON query_logs (created_at DESC);
 CREATE INDEX query_logs_user    ON query_logs (user_id, created_at DESC);
+CREATE INDEX query_logs_ip ON query_logs (ip, created_at DESC);   -- abuse 調查（DL-022）
+CREATE INDEX ingest_errors_kb ON ingest_errors (kb_version, resolved);
 ```
 
 **規則**：
@@ -521,6 +556,7 @@ LIMIT :top_k;
 
 **規則**：
 - **MUST**：每次查詢前 `SET LOCAL hnsw.ef_search = 100`（OPEN：依實測調校）
+- **MUST**：與 `SET LOCAL hnsw.ef_search` 同一 transaction 內加 `SET LOCAL hnsw.iterative_scan = strict_order`（pgvector ≥0.8）——HNSW 為跨 kb_version 全域索引，非 iterative 模式下帶版本過濾會撈不滿 Top-K（blue-green 期尤甚）（DL-022 審查修訂）
 - **SHOULD**：對 query 做 metadata 推斷（例「上肢神經」→ `{"anatomy_system": "nervous"}`）縮小候選空間
 - **MUST NOT**：返回未帶 `kb_version` 的查詢
 
@@ -961,6 +997,7 @@ OpenAI 標準付費 API 有 RPM/TPM 限額，課堂同步使用會撞限額。
 - **MUST**：教師/admin 角色不受限（透過 SSO claim 判斷）
 - **MUST**：限流規則寫入設定檔，可不重啟服務調整
 - **SHOULD**：用 `slowapi` 或 `fastapi-limiter`
+- **MUST（DL-022）**：限流拒絕等高頻事件不逐筆寫 DB；Redis TTL 計數器（跨 worker），每回合成功/失敗的單列紀錄才入 `query_logs`（含 ip/country/user_agent 供 abuse 調查）
 
 ## 6.9 安全與祕鑰
 
