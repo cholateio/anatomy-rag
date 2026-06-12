@@ -330,14 +330,16 @@ T+10s   [SSE]   "done"；並行 asyncio.create_task：寫 query_logs / 寫快取
 ## 2.6 執行模式
 
 - 輸入：本地 PDF 路徑 + 書籍 metadata YAML；輸出：寫入 PostgreSQL + 上傳 PNG 到物件儲存
-- 重新執行：先 `DELETE FROM pages WHERE book_id = ? AND kb_version = ?` 再重跑
+- 重新執行：以顯式 `--book-id` 指定既有書；不帶 `--resume` 時先 `DELETE FROM pages WHERE book_id = ? AND kb_version = ?`（page_patches 經 ON DELETE CASCADE 連帶刪）再重跑（首次建庫不帶 `--book-id`，新增一本書）
 
 ```bash
-python -m ingest.cli \
+python -m anatomy_ingest.cli \
     --pdf /data/books/gray_anatomy_42e.pdf \
     --book-meta /data/books/gray_anatomy_42e.yaml \
     --kb-version 3 --batch-size 8
 ```
+
+> **交易語意（DL-023）**：提交邊界為**批**（`--batch-size`）非整書。每批：先在交易外完成編碼與 PNG 上傳，再開一個短交易逐頁 `SAVEPOINT`（成功 `RELEASE`、失敗 `ROLLBACK TO SAVEPOINT` 並於同交易寫 `ingest_errors`），批末 `COMMIT`。上游階段（render/encode/upload）失敗逐頁寫 stage-specific `ingest_errors` 並續跑。`--resume`（須搭 `--book-id`）依 `pages` 已存在的 `(book_id, page_num, kb_version)` 跳過已完成頁。連線走 PgBouncer `:6432`（交易短、不跨編碼）。
 
 ## 2.7 失敗處理
 

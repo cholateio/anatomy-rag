@@ -306,3 +306,55 @@ make up-obs   # 另起 LangFuse（自帶獨立 Postgres，對外 :3100，避開 
 - ⏳ **尚未**：真實檢索 / 建庫 / `/chat`（Phase 1 起逐步交付，端到端在 Phase 8）。
 
 有任何一步「成功應看到什麼」對不上，先查 §C；仍卡住再回報，並附上該步的指令與輸出。
+
+---
+
+## §F 離線建庫管線（ingest，Phase 4）
+
+> 離線批次：PDF + 書籍 YAML → Docling 逐頁 Markdown/metadata、pdf2image PNG、ColPali 編碼 →
+> 二值化 → 寫 Postgres（pages/page_patches，帶 kb_version）+ 上傳 PNG 到 MinIO。
+> **離線管線 MUST NOT 呼叫任何雲端 LLM API**（CI grep 守門 + socket guard 測試）。
+
+### F.1 系統前置（poppler）
+
+pdf2image 需 poppler 後端（`pdftoppm`）。host GPU venv 與任何真實建庫環境須安裝：
+
+```bash
+sudo apt-get update && sudo apt-get install -y poppler-utils
+pdftoppm -v   # 驗證有輸出版本
+```
+
+> mock smoke（`make ingest-sample`，§F.2）走 `--synthetic` 合成頁面源，**不需 poppler/GPU**。
+
+### F.2 mock smoke（無 GPU / 無 poppler / 無真 PDF）
+
+合成 N 頁 + 決定性 mock runtime，寫入真 DB/MinIO，驗端到端寫入路徑：
+
+```bash
+make up && make migrate      # 起服務 + migrate（首次）
+make ingest-sample           # synthetic 6 頁 → kb_version=1
+```
+
+成功應看到多行 `[batch] 寫入 [...]` 與 `[done] 共寫入 6 頁、失敗 0 頁；抽樣校驗 {'sampled': 1, 'mismatches': []}`。
+
+### F.3 真實建庫 / GPU gate
+
+```bash
+# 端到端 GPU gate（3 頁可區辨 PDF + real ColPali + 真 MinIO/PG；需 poppler + GPU venv）
+make ingest-gate
+
+# 正式建庫（首次：不帶 --book-id）
+uv run --no-sync python -m anatomy_ingest.cli \
+    --pdf /data/books/gray_42e.pdf --book-meta /data/books/gray_42e.yaml \
+    --kb-version 1 --batch-size 8
+
+# 重建同一本書（先刪該 book+kb_version 既有頁）
+uv run --no-sync python -m anatomy_ingest.cli \
+    --pdf ... --book-meta ... --kb-version 1 --book-id <UUID>
+
+# 從失敗頁續跑（須帶 --book-id；跳過 pages 已存在的頁）
+uv run --no-sync python -m anatomy_ingest.cli \
+    --pdf ... --book-meta ... --kb-version 1 --book-id <UUID> --resume
+```
+
+`make ingest-gate` 成功應看到逐頁 `[gate] page N patches=... png=...B OK` 與最後 `[gate] PASS`。
