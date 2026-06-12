@@ -358,3 +358,8 @@ uv run --no-sync python -m anatomy_ingest.cli \
 ```
 
 `make ingest-gate` 成功應看到逐頁 `[gate] page N patches=... png=...B OK` 與最後 `[gate] PASS`。
+
+> **⚠️ 並發限制（v1）**：離線建庫假設**單一操作員串行執行**。**請勿同時對同一 `(book_id, kb_version)`
+> 跑兩個 ingest**——兩個 run 會把不同影像寫到相同的 deterministic 物件鍵並競爭 DB 列插入，可能造成
+> DB metadata 指向另一 run 的 PNG。需重建請改 ingest 到**新的 `--kb-version`**（blue-green，§6.6），
+> 評估達標後再切 `ACTIVE_KB_VERSION`；per-run advisory lock / staging key 的硬性序列化歸 Phase 13 runbook。
