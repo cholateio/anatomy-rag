@@ -1,19 +1,10 @@
-"""Encoder 抽象：Phase 0/1 決定性 mock（delegate 到 shared runtime）。
-
-Phase 3 接真實 ColPali + 本地 MT（DL-020）。
-"""
+"""Encoder 抽象：mock（決定性，delegate 到 shared runtime）與真實路徑的工廠。"""
 import os
-import re
 
 from anatomy_shared.binary import binarize, pool_patches
 from anatomy_shared.colpali_runtime import MockColPaliRuntime
 
-_CJK_RE = re.compile(r"[㐀-䶿一-鿿]")
-
-
-def _detect_lang(text: str) -> str:
-    """含 CJK 字元即視為需翻譯的中文/混語 query（DL-020）。"""
-    return "zh" if _CJK_RE.search(text) else "en"
+from colpali_service.translate import detect_lang
 
 
 class MockEncoder:
@@ -23,6 +14,7 @@ class MockEncoder:
     """
 
     ready = True
+    mt_model = "mock-identity"
 
     def __init__(self) -> None:
         self._runtime = MockColPaliRuntime()
@@ -36,26 +28,23 @@ class MockEncoder:
         return {
             "tokens_bin": [binarize(t) for t in valid],
             "pooled_f32": pooled_f32.tobytes(),
-            # DL-020：mock 為決定性 identity 翻譯（真實本地 MT 於 Phase 3 接 opus-mt-zh-en）
+            # DL-020：mock 為決定性 identity 翻譯（真實本地 MT 見 translate.py）
             "translated_q": q,
-            "lang": _detect_lang(q),
+            "lang": detect_lang(q),
             "model": self.model,
-            "mt_model": "mock-identity",
+            "mt_model": self.mt_model,
         }
 
 
 def get_encoder():
-    # Phase 3：ENCODER_MOCK=false 時回真實 ColPali encoder
     if os.environ.get("ENCODER_MOCK", "true").lower() == "true":
         return MockEncoder()
-    # 真實 encoder 於 Phase 3 才實作；在此之前（如 make up-gpu 設 ENCODER_MOCK=false）
-    # 應給出清楚指引，而非讓容器以難解的 ModuleNotFoundError 崩潰。
     try:
-        from colpali_service.real_encoder import RealColPaliEncoder  # Phase 3 實作
-    except ModuleNotFoundError as e:
-        raise NotImplementedError(
-            "真實 ColPali encoder 尚未實作（Phase 3）。目前僅支援 mock：請設 ENCODER_MOCK=true。"
-            "（make up-gpu 的真實 GPU 推理路徑將於 Phase 3 接 vidore/colpali-v1.3-hf 後啟用；"
-            "Phase 0 的 GPU 硬體驗證請用 make gpu-smoke）"
+        from colpali_service.real_encoder import build_real_encoder
+    except ImportError as e:
+        raise RuntimeError(
+            "真實 encoder 需要 gpu 依賴（torch/transformers/sentencepiece/OpenCC）："
+            "請以 gpu extra 安裝（uv sync --package colpali-service --extra gpu）"
+            "並用 make up-gpu 啟動；mock 請設 ENCODER_MOCK=true。"
         ) from e
-    return RealColPaliEncoder()
+    return build_real_encoder()

@@ -36,15 +36,6 @@ async def test_encode_query_english_is_identity_lang_en():
     assert j["lang"] == "en" and j["translated_q"] == "origin of biceps brachii"
 
 
-def test_get_encoder_real_not_implemented_yet(monkeypatch):
-    """ENCODER_MOCK=false 但真實 encoder 未實作（Phase 3 前，如 make up-gpu）→
-    應拋清楚的 NotImplementedError，而非難解的 ModuleNotFoundError。"""
-    import colpali_service.encoder as enc
-
-    monkeypatch.setenv("ENCODER_MOCK", "false")
-    with pytest.raises(NotImplementedError, match="Phase 3"):
-        enc.get_encoder()
-
 
 @pytest.mark.asyncio
 async def test_encode_query_distinct_queries_and_fp32_pooled_contract():
