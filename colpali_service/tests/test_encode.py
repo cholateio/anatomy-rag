@@ -1,20 +1,30 @@
 import base64
+from contextlib import asynccontextmanager
 
 import pytest
-from colpali_service.main import app
+from asgi_lifespan import LifespanManager
 from httpx import ASGITransport, AsyncClient
+
+
+@asynccontextmanager
+async def _client():
+    from colpali_service.main import app
+
+    async with LifespanManager(app) as mgr:
+        async with AsyncClient(transport=ASGITransport(app=mgr.app), base_url="http://t") as c:
+            yield c
 
 
 @pytest.mark.asyncio
 async def test_healthz_ready():
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+    async with _client() as c:
         r = await c.get("/healthz")
     assert r.status_code == 200 and r.json()["ready"] is True
 
 
 @pytest.mark.asyncio
 async def test_encode_query_deterministic_contract():
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+    async with _client() as c:
         r1 = await c.post("/encode_query", json={"q": "肱二頭肌的起止點"})
         r2 = await c.post("/encode_query", json={"q": "肱二頭肌的起止點"})
     j1, j2 = r1.json(), r2.json()
@@ -30,7 +40,7 @@ async def test_encode_query_deterministic_contract():
 @pytest.mark.asyncio
 async def test_encode_query_english_is_identity_lang_en():
     """純英文 query：lang=en、translated_q 為原文（DL-020 identity 路徑）。"""
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+    async with _client() as c:
         r = await c.post("/encode_query", json={"q": "origin of biceps brachii"})
     j = r.json()
     assert j["lang"] == "en" and j["translated_q"] == "origin of biceps brachii"
@@ -45,7 +55,7 @@ async def test_encode_query_distinct_queries_and_fp32_pooled_contract():
     from anatomy_shared.binary import pool_patches
     from anatomy_shared.colpali_runtime import MockColPaliRuntime
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+    async with _client() as c:
         r1 = await c.post("/encode_query", json={"q": "肱二頭肌"})
         r2 = await c.post("/encode_query", json={"q": "橈神經"})
     j1, j2 = r1.json(), r2.json()
