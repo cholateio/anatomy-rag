@@ -1,4 +1,4 @@
-.PHONY: help up up-gpu up-obs down logs migrate gpu-smoke golden-bytes ingest-sample bench-stageb test lint fmt
+.PHONY: help up up-gpu up-obs down logs migrate gpu-smoke golden-bytes ingest-sample bench-stageb test lint fmt encoder-models encoder-gate
 
 help:
 	@echo "make up / up-gpu / up-obs / down / logs"
@@ -7,6 +7,8 @@ help:
 	@echo "make golden-bytes # 產生 Vercel UI Message Stream golden wire bytes"
 	@echo "make bench-stageb  # Stage B MaxSim 延遲探針（手動；需 compose 起 DB + 已 migrate；DL-013，非 CI gate）"
 	@echo "make test / lint / fmt / ingest-sample"
+	@echo "make encoder-models # 預拉 HF 模型進 hfcache volume（首次 ~7-8GB；GPU 路徑前置步驟）"
+	@echo "make encoder-gate   # Phase 3 encoder smoke gate（手動 GPU；需先 encoder-models）"
 
 up:
 	docker compose up --build -d
@@ -59,3 +61,14 @@ lint:
 fmt:
 	uv sync --group dev --inexact
 	uv run --no-sync ruff format .
+
+# 預拉 HF 模型進 hfcache volume（首次 ~7–8GB；之後重建/重啟免重抓）。需先 build GPU image。
+encoder-models:
+	docker compose -f docker-compose.yml -f docker-compose.gpu.yml build encoder
+	docker compose -f docker-compose.yml -f docker-compose.gpu.yml run --rm --no-deps encoder \
+	  uv run --no-sync python -c "from huggingface_hub import snapshot_download as d; d('vidore/colpali-v1.3-hf'); d('Helsinki-NLP/opus-mt-zh-en'); print('models cached')"
+
+# Phase 3 encoder smoke gate（D-P 種子；手動 GPU，非 CI）：渲染偽頁面→真模型編碼→zh/en 雙軌 recall@3
+encoder-gate:
+	docker compose -f docker-compose.yml -f docker-compose.gpu.yml run --rm --no-deps encoder \
+	  uv run --no-sync python colpali_service/scripts/encoder_gate.py

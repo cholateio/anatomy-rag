@@ -2,10 +2,18 @@
 services:
   encoder:
     build: { context: ., dockerfile: colpali_service/Dockerfile }   # GPU 版
-    environment: { ENCODER_MOCK: "false", COLPALI_DEVICE: cuda }
+    environment: { ENCODER_MOCK: "false", COLPALI_DEVICE: cuda, HF_HOME: /hf-cache }
+    volumes: [ "hfcache:/hf-cache" ]          # 模型權重快取：重建 image / 重啟不重抓 ~7GB
+    healthcheck:                               # 覆蓋核心 compose 的 5s×10：真模型載入需分鐘級
+      test: ["CMD", "curl", "-f", "http://localhost:8001/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
     deploy:
       resources:
         reservations:
           devices: [{ driver: nvidia, count: 1, capabilities: [gpu] }]
   backend:
     environment: { ENCODER_MOCK: "false" }
+volumes: { hfcache: {} }
