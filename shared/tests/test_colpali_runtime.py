@@ -1,4 +1,5 @@
 """MockColPaliRuntime 契約測試：形狀、valid_mask、決定性、torch-free（D-L）。"""
+import importlib.util
 import subprocess
 import sys
 
@@ -54,8 +55,13 @@ def test_get_runtime_mock_returns_mock_instance():
     assert isinstance(rt, MockColPaliRuntime)
 
 
-def test_get_runtime_real_not_implemented_yet():
-    with pytest.raises(NotImplementedError, match="Phase 3"):
+@pytest.mark.skipif(
+    importlib.util.find_spec("torch") is not None,
+    reason="僅在無 torch 環境驗證錯誤訊息",
+)
+def test_get_runtime_real_raises_runtime_error_without_torch():
+    """無 torch 安裝時，get_runtime(mock=False) 應提示安裝 gpu extra（RuntimeError）。"""
+    with pytest.raises(RuntimeError, match="gpu"):
         get_runtime(mock=False)
 
 
