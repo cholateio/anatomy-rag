@@ -118,3 +118,21 @@ async def test_stale_loader_cannot_pollute_new_lifespan(monkeypatch):
             assert old_state["encoder"].model == "stale"   # mutation 偵測力：stale 確實寫完了
             r = await c.get("/healthz")
             assert r.json()["model"] == "fresh"   # 新狀態不被 stale 覆寫
+
+
+def test_warmup_query_exercises_mt_path():
+    """warmup 字串必須含非 glossary 的 CJK 段，否則 Marian 永遠冷啟（Codex 終審 P2）。"""
+    from colpali_service.main import WARMUP_QUERY
+    from colpali_service.translate import LocalTranslator, load_glossary
+
+    calls: list[list[str]] = []
+
+    def spy(texts):
+        calls.append(texts)
+        return ["warm segment"] * len(texts)
+
+    tr = LocalTranslator(mt_fn=spy, mt_model_name="f",
+                         glossary=load_glossary(), t2s_fn=lambda s: s)
+    r = tr.translate(WARMUP_QUERY)
+    assert calls, "warmup query 未觸發 MT——Marian 會保持冷啟"
+    assert r.translated_q is not None

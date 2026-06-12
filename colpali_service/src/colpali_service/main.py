@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 _infer_lock = threading.Lock()   # GPU 推理序列化（跨 lifespan 共用無妨）
 
+# warmup 字串 MUST 含非 glossary 的 CJK 段，否則 glossary 全吃、Marian generate 永遠冷啟
+# （Codex 終審 P2）；「心臟瓣膜的位置」不在 glossary_zh_en.tsv 中，必走 MT。
+WARMUP_QUERY = "心臟瓣膜的位置"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -33,8 +37,8 @@ async def lifespan(app: FastAPI):
     def load() -> None:
         try:
             enc = get_encoder()
-            # §5.1 SHOULD：startup dummy encode（暖 MT+ColPali）
-            enc.encode_query("肱二頭肌的起止點")
+            # §5.1 SHOULD：startup dummy encode（暖 MT+ColPali；WARMUP_QUERY 必走 Marian generate）
+            enc.encode_query(WARMUP_QUERY)
             state["encoder"] = enc                # ready ⇒ 已預熱（dummy encode 成功才掛上）
             logger.info("encoder 就緒：%s", enc.model)
         except Exception as e:  # noqa: BLE001 - 載入失敗必須呈現在 /healthz，不可讓執行緒靜默死亡
@@ -100,5 +104,5 @@ async def warmup(request: Request) -> dict:
     enc = request.app.state.enc["encoder"]
     if enc is None:
         raise HTTPException(status_code=503, detail="encoder 尚未就緒")
-    await anyio.to_thread.run_sync(_encode_sync, enc, "肱二頭肌的起止點")
+    await anyio.to_thread.run_sync(_encode_sync, enc, WARMUP_QUERY)
     return {"warmed": True}
