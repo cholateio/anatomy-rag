@@ -23,15 +23,28 @@ _SYNTH_BODY = "Synthetic page {n}. The structure is described here. See Fig. {n}
 def pdf_source(pdf_path: str, book_meta: dict[str, Any]) -> Iterator[SourcePage]:
     """真實路徑：PDF → SourcePage（解析 + 渲染對齊頁碼）。
 
-    解析/渲染頁碼**對齊**：每個被解析出的頁都產出一個 SourcePage——若渲染缺該頁影像，
-    `image=None`（**不靜默丟棄**），由 cli 記 stage='render' 的 ingest_error 並計為失敗
-    （§2.7：單頁失敗須留痕，不可變成「成功的遺漏」）。
+    解析/渲染頁碼**對齊**（FIX C，Codex high #5）：
+    - 每個被解析出的頁都產出一個 SourcePage——若渲染缺該頁影像，`image=None`（不靜默丟棄），
+      由 cli 記 stage='render' 的 ingest_error 並計為失敗（§2.7）。
+    - 渲染出但 Docling **未解析**的頁也不靜默丟棄：產出含 `parse_failed=True` placeholder 的
+      SourcePage，由 cli 記 stage='parse' 的 ingest_error 並計為失敗。
+    迭代 parses ∪ images 的 UNION 以確保兩種遺漏均被捕捉。
     """
     doc = convert_pdf(pdf_path)
     parses = {p.page_num: p for p in extract_pages(doc, book_meta)}
     images = render_pdf_pages(pdf_path)
-    for page_num in sorted(parses):
-        yield SourcePage(parse=parses[page_num], image=images.get(page_num))  # 缺圖→None，不丟棄
+    all_pages = sorted(set(parses) | set(images))
+    for page_num in all_pages:
+        if page_num in parses:
+            yield SourcePage(parse=parses[page_num], image=images.get(page_num))  # 缺圖→None
+        else:
+            # 渲染出但 Docling 未解析：產出 parse_failed 佔位符，image 保留供 cli 記錯
+            placeholder = PageParse(
+                page_num=page_num,
+                markdown="",
+                metadata={"page_num": page_num, "parse_failed": True},
+            )
+            yield SourcePage(parse=placeholder, image=images.get(page_num))
 
 
 def synthetic_source(n_pages: int, book_meta: dict[str, Any]) -> Iterator[SourcePage]:

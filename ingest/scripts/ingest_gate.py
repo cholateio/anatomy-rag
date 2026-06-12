@@ -43,6 +43,17 @@ async def main():
     os.environ.setdefault("S3_SECRET_KEY", "minioadmin")
     cfg = IngestConfig.from_env()
 
+    # FIX B（Codex high #3）：fail-fast — kb_version=9000 若已有資料代表上次清理不完全
+    _preflight_conn = await asyncpg.connect(os.environ["DATABASE_URL"], statement_cache_size=0)
+    try:
+        existing = await _preflight_conn.fetchval(
+            "SELECT count(*) FROM pages WHERE kb_version=$1", KB
+        )
+    finally:
+        await _preflight_conn.close()
+    if existing > 0:
+        raise SystemExit(f"gate kb_version {KB} 已有資料（{existing} 頁），請先清理")
+
     with tempfile.TemporaryDirectory() as td:
         pdf = os.path.join(td, "gate.pdf")
         meta = os.path.join(td, "gate.yaml")
@@ -53,6 +64,9 @@ async def main():
             ["--pdf", pdf, "--book-meta", meta, "--kb-version", str(KB), "--batch-size", "2"]
         )
         rc = await _run(ns)
+
+    # FIX B（Codex high #3）：ingest 失敗立即中止，不跑驗證查詢
+    assert rc == 0, f"ingest 失敗 rc={rc}"
 
     conn = await asyncpg.connect(os.environ["DATABASE_URL"], statement_cache_size=0)
     s3 = cfg.make_s3_client()

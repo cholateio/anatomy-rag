@@ -62,11 +62,13 @@ def _load_book_meta(path: str) -> dict[str, Any]:
 
 
 async def _resolve_book(conn, ns, book_meta: dict[str, Any]):
-    """書本識別（§2.6，Codex high #3）：
+    """書本識別（§2.6，Codex high #1 修正版）：
 
-    - 帶 --book-id：書須存在。無 --resume＝重建 → 先 DELETE pages（cascade page_patches）；
-      --resume → 不刪、回傳既有 book_id 供跳過已完成頁。
+    - 帶 --book-id：書須存在。無 --resume＝需重建（needs_rebuild=True）→ **不在此刪除**，
+      由 _run 在來源解析成功後才刪（避免 PDF 解析失敗時舊版本已被清空）；
+      --resume → needs_rebuild=False，不刪、供跳過已完成頁。
     - 不帶 --book-id：--resume 為非法（不靠 title 猜書）；否則新增一本書（首次建庫）。
+    回傳 (book_uuid, needs_rebuild: bool)。
     """
     if ns.book_id:
         import uuid
@@ -78,14 +80,8 @@ async def _resolve_book(conn, ns, book_meta: dict[str, Any]):
         exists = await conn.fetchval("SELECT 1 FROM books WHERE book_id = $1", book_uuid)
         if not exists:
             raise SystemExit(f"--book-id {ns.book_id} 不存在；首次建庫請不帶 --book-id")
-        if not ns.resume:
-            # §2.6 重新執行：先刪該書該版本既有頁（page_patches 經 ON DELETE CASCADE 連帶刪）
-            await conn.execute(
-                "DELETE FROM pages WHERE book_id = $1 AND kb_version = $2",
-                book_uuid, ns.kb_version,
-            )
-            print(f"[rebuild] 已刪除 book={ns.book_id} kb_version={ns.kb_version} 既有頁，重建")
-        return book_uuid
+        needs_rebuild = not ns.resume
+        return book_uuid, needs_rebuild
     if ns.resume:
         raise SystemExit("--resume 須搭配 --book-id（不靠 title 猜書，避免續跑到錯的書/版本）")
     book_uuid = await conn.fetchval(
@@ -94,7 +90,7 @@ async def _resolve_book(conn, ns, book_meta: dict[str, Any]):
         str(book_meta.get("edition") or ""), book_meta.get("isbn"),
     )
     print(f"[new] 新增書本 book_id={book_uuid}")
-    return book_uuid
+    return book_uuid, False
 
 
 async def _encode_and_upload_batch(runtime, s3, cfg, book_id, kb_version, conn, batch_pages):
@@ -109,6 +105,12 @@ async def _encode_and_upload_batch(runtime, s3, cfg, book_id, kb_version, conn, 
     records, failed = [], []
     for sp in batch_pages:
         pn = sp.parse.page_num
+        # FIX C（Codex high #5）：Docling 未解析此頁（parse_failed 佔位符）→ 記 parse 失敗，跳過
+        if sp.parse.metadata.get("parse_failed"):
+            err = RuntimeError("Docling 未解析此頁")
+            await record_page_error(conn, book_id, kb_version, pn, err, "parse")
+            failed.append(pn)
+            continue
         if sp.image is None:  # 渲染缺頁（pdf_source 未丟棄）→ 記 render 失敗，跳過
             err = RuntimeError("render 缺頁影像")
             await record_page_error(conn, book_id, kb_version, pn, err, "render")
@@ -158,7 +160,7 @@ async def _run(ns: argparse.Namespace) -> int:
     conn = await asyncpg.connect(cfg.database_url, statement_cache_size=0)
     try:
         await ensure_kb_partition(conn, ns.kb_version)
-        book_id = await _resolve_book(conn, ns, book_meta)
+        book_id, needs_rebuild = await _resolve_book(conn, ns, book_meta)
 
         # 來源段（parse/render 為整檔操作）：整檔失敗記 book 層 parse 錯誤、非零退出（§2.7）
         try:
@@ -170,6 +172,14 @@ async def _run(ns: argparse.Namespace) -> int:
             await record_page_error(conn, book_id, ns.kb_version, None, exc, "parse")
             print(f"[fatal] 來源解析/渲染失敗：{exc!r}（已記 ingest_errors stage=parse）")
             return 1
+
+        # FIX A（Codex high #1）：來源解析成功後才刪舊頁，避免 PDF 失敗時舊版本已被清空
+        if needs_rebuild:
+            await conn.execute(
+                "DELETE FROM pages WHERE book_id = $1 AND kb_version = $2",
+                book_id, ns.kb_version,
+            )
+            print(f"[rebuild] 已刪除 book={book_id} kb_version={ns.kb_version} 既有頁，重建")
 
         completed = await completed_page_nums(conn, book_id, ns.kb_version) if ns.resume else set()
         todo, skipped = plan_pages(pages, completed)
