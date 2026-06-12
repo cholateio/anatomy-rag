@@ -13,7 +13,6 @@ class MockEncoder:
     向量來源＝shared 的 MockColPaliRuntime；二值化/池化＝shared.binary（§2.4 單一來源）。
     """
 
-    ready = True
     mt_model = "mock-identity"
 
     def __init__(self) -> None:

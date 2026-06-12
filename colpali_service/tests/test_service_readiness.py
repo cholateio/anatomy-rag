@@ -66,11 +66,17 @@ async def test_load_failure_stays_503_with_error(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_stale_loader_cannot_pollute_new_lifespan(monkeypatch):
-    """舊 lifespan 的慢載入完成後，不得覆寫新 lifespan 的狀態。"""
+    """舊 lifespan 的慢載入完成後，不得覆寫新 lifespan 的狀態。
+
+    以 Event 顯式同步（非排程順序/sleep）：started 保證舊 loader 已起跑並 park，
+    stale_done 保證舊執行緒的寫入已落地後才做最終斷言。
+    """
     import colpali_service.main as m
 
     gate = threading.Event()
-    calls = {"n": 0}
+    started = threading.Event()
+    stale_done = threading.Event()  # noqa: F841  # 概念標記；實作以輪詢 old_state 替代
+    first = threading.Event()   # 第一個取得者=舊 lifespan 的 loader（test-and-set，無排程假設）
 
     class Enc:
         mt_model = "fake-mt"
@@ -83,16 +89,20 @@ async def test_stale_loader_cannot_pollute_new_lifespan(monkeypatch):
             return MockEncoder().encode_query(q)
 
     def loader():
-        calls["n"] += 1
-        if calls["n"] == 1:
-            gate.wait(timeout=10)        # 第一個 lifespan 的載入卡住
+        if not first.is_set():
+            first.set()
+            started.set()
+            gate.wait(timeout=10)        # 舊 lifespan 的載入 park 在此
             return Enc("stale")
         return Enc("fresh")
 
     monkeypatch.setenv("ENCODER_MOCK", "false")
     monkeypatch.setattr(m, "get_encoder", loader)
     async with LifespanManager(m.app):
-        pass                              # 舊 lifespan 結束時 loader 仍卡在 gate
+        assert started.wait(timeout=5)    # 舊 loader 確定已起跑並 park，才結束舊 lifespan
+    # 監看舊執行緒何時把 stale 寫進它那份舊 dict
+    old_state = m.app.state.enc
+
     async with LifespanManager(m.app) as mgr:
         async with AsyncClient(transport=ASGITransport(app=mgr.app), base_url="http://t") as c:
             for _ in range(100):
@@ -102,6 +112,10 @@ async def test_stale_loader_cannot_pollute_new_lifespan(monkeypatch):
                 await asyncio.sleep(0.05)
             assert r.json()["model"] == "fresh"
             gate.set()                    # 放行舊執行緒（寫進它自己那份舊 dict）
-            await asyncio.sleep(0.2)
+            for _ in range(100):          # 等 stale 寫入落地（觀察舊 dict，非 sleep 猜時間）
+                if old_state["encoder"] is not None and old_state["encoder"].model == "stale":
+                    break
+                await asyncio.sleep(0.01)
+            assert old_state["encoder"].model == "stale"   # mutation 偵測力：stale 確實寫完了
             r = await c.get("/healthz")
             assert r.json()["model"] == "fresh"   # 新狀態不被 stale 覆寫
