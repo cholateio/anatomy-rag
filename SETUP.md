@@ -182,18 +182,94 @@ make gpu-smoke
 - ❌ `CUDA 不可用`：torch 非 cu128（確認 GPU Dockerfile 用 `--index-url .../cu128`）；或驅動不支援 CUDA 12.8。
 - ❌ `no kernel image is available`：驅動 / CUDA 版本與 sm_120 不匹配，升級驅動。
 
-### B.3 啟動真實 encoder + LLM
+### B.3 GPU encoder 啟用（Phase 3）
 
-> ⚠️ **`make up-gpu` 需 Phase 3**：真實 ColPali encoder（`colpali_service/real_encoder.py`）於 **Phase 3** 才實作。在那之前，`ENCODER_MOCK=false` 會讓 encoder 容器以清楚的 `NotImplementedError` 拒絕啟動（指引你設 `ENCODER_MOCK=true`）。**Phase 0 的 GPU 硬體驗證請用 `make gpu-smoke`（§B.2）**，它只 build GPU 映像並驗 `torch.cuda`，不啟動真實服務。
+> **前置確認**
+> - Phase 0 的 `make gpu-smoke` 已通過（cu128/driver 正常）。
+> - 首次拉模型約需 **7 GB** 下載：`vidore/colpali-v1.3-hf` ≈ 6.6 GB、`Helsinki-NLP/opus-mt-zh-en` ≈ 312 MB；請確認已取得使用者授權再執行步驟 1。
+
+#### B.3.1 步驟 1：預拉模型權重（`make encoder-models`）
+
+```bash
+make encoder-models
+```
+
+此指令會先 build GPU image（首次 build 含 cu128 torch wheel 下載，**約 10–20 分鐘**；之後 BuildKit cache 秒回），再把兩個模型下載進 named volume `anatomy-rag_hfcache`（容器內掛 `/hf-cache`，`HF_HOME` 指向它）。
+
+- ✅ **成功應看到**：輸出結尾 `models cached`。
+- 📝 實測：ColPali 10 檔約 7.5 分鐘、Marian 12 檔約 1.5 分鐘（依網速）；之後重建 image／重啟容器不需重抓。
+- ❌ 下載中斷：直接重跑（`snapshot_download` 自動續傳）。
+
+#### B.3.2 步驟 2：以 GPU 模式啟動 encoder（`make up-gpu`）
+
+```bash
+make up-gpu
+```
+
+encoder 以真實模式啟動（`ENCODER_MOCK=false`）。模型載入期間 `/healthz` 回 **503**（`{"ready": false, ...}`），這是預期行為——compose healthcheck（10s × 60、start_period 60s）會等它。
+
+- ✅ **成功應看到**（權重已快取時載入約 30–60 秒；實測容器啟動後 ~30 秒內 healthy）：
+  ```bash
+  curl -s localhost:8001/healthz
+  # → {"ready":true,"model":"vidore/colpali-v1.3-hf","mt_model":"Helsinki-NLP/opus-mt-zh-en"}
+  ```
+- ❌ healthz 持續 503 且 body 有 `error` 欄：`docker logs anatomy-rag-encoder-1` 看載入失敗原因（loading_info 守門 fail-fast 會在此呈現）。
+- ❌ CUDA 不可用：回跑 `make gpu-smoke`（§B.2）確認驅動。
+- ❌ VRAM 不足：關閉其他 GPU 程式（ColPali bf16 約需 **7 GB** VRAM）。
+
+#### B.3.3 步驟 3：真實 `/encode_query` 契約驗收（2026-06-13 實測通過）
+
+```bash
+curl -s -X POST localhost:8001/encode_query -H 'content-type: application/json' \
+  -d '{"q": "肱二頭肌的起止點"}' | python3 -c "
+import json,sys,base64
+j = json.load(sys.stdin)
+assert len(base64.b64decode(j['pooled_f32'])) == 512
+assert all(len(base64.b64decode(t)) == 16 for t in j['tokens_bin'])
+assert j['lang'] == 'zh' and j['model'] == 'vidore/colpali-v1.3-hf'
+print('契約 OK | tokens:', len(j['tokens_bin']), '| translated_q:', j['translated_q'])"
+curl -s -X POST localhost:8001/warmup     # → {"warmed":true}
+```
+
+- ✅ **成功應看到**：`契約 OK | tokens: 20 | translated_q: biceps brachii origin and insertion`
+- 📝 glossary 命中、虛詞「的」丟棄；token 數隨 query 而異，**下游不可假設固定值**。
+
+#### B.3.4 步驟 4：gpu/mt 測試與 smoke gate
+
+```bash
+# GPU image 為 --no-dev（無 pytest）→ 容器內先補 dev 群組再跑
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml run --rm --no-deps encoder \
+  sh -c "uv sync --group dev --inexact && uv run --no-sync pytest colpali_service/tests/test_real_runtime_gpu.py -q"
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml run --rm --no-deps -e RUN_MT_TESTS=1 encoder \
+  sh -c "uv sync --group dev --inexact && uv run --no-sync pytest colpali_service/tests/test_marian_mt.py -q"
+make encoder-gate
+```
+
+- ✅ **成功應看到**：`encoder-gate` 結尾 `GATE PASS`（exit 0）。
+  - gate 行為：16 偽頁面 + 24 題 zh/en，MaxSim 與 pooled cosine 雙軌 recall@3 皆須過門檻（en ≥ 0.9/0.75、zh ≥ 0.75/0.6）。
+- ❌ gate 失敗：先看每題印出的 `translated_q` 品質（MT 問題 → 補 `colpali_service/glossary_zh_en.tsv` 詞條後重跑）；仍不過 → 依 DL-020 升級序（NLLB-600M → 跨語言 encoder）回報專案負責人裁決。**門檻不可為過關調低**（調整須附理由記入 PR）。
+- 📝 與 `make up-gpu` 的服務容器同時跑會雙載模型（~13 GB VRAM）；16 GB 卡可行，VRAM 吃緊時先 `docker compose stop encoder` 再跑測試。
+
+#### B.3.5 回退 mock
+
+無 GPU 或測試環境需 mock encoder 時：
+
+```bash
+make up    # 核心 compose 即 mock encoder，無 GPU 需求
+```
+
+### B.4 啟動真實 encoder + LLM
+
+> ⚠️ Phase 3 的 encoder 啟用詳見 §B.3；本節補充接上真實 LLM 的步驟。
 
 1. 編輯 `.env`：填入 `OPENAI_API_KEY=sk-...`（**MUST 用 OpenAI 標準付費 API，禁用免費／個人版**），把 `LLM_MOCK=false`。
 2. 以 GPU override 啟動（encoder 改真實 ColPali、`ENCODER_MOCK=false`）：
    ```bash
    make up-gpu
    ```
-- ✅ **成功應看到**（Phase 3 起）：`encoder` 容器 healthy 且 `/healthz` 的 `model` 不再是 `mock-colpali`；GPU 被佔用（`nvidia-smi`）。
+- ✅ **成功應看到**：`encoder` 容器 healthy 且 `/healthz` 的 `model` 不再是 `mock-colpali`；GPU 被佔用（`nvidia-smi`）。
 
-### B.4 觀測（選用）
+### B.5 觀測（選用）
 
 ```bash
 make up-obs   # 另起 LangFuse（自帶獨立 Postgres，對外 :3100，避開 Next.js :3000）
