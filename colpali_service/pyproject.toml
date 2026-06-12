@@ -3,9 +3,15 @@ name = "colpali-service"
 version = "0.0.0"
 requires-python = ">=3.11"
 dependencies = ["anatomy-shared", "fastapi>=0.115", "uvicorn[standard]>=0.34",
-                "pydantic>=2.7", "pydantic-settings>=2.3", "numpy>=1.26"]
+                "pydantic>=2.7", "pydantic-settings>=2.3", "numpy>=1.26", "anyio>=4"]
 [project.optional-dependencies]
-gpu = ["anatomy-shared[colpali]"]   # 真實 ColPali（torch/transformers）；mock/CPU 路徑不需，故設為 extra
+# 真實 ColPali + 本地 MT（DL-020）；mock/CPU 路徑不需，故全在 extra
+gpu = [
+  "anatomy-shared[colpali]",
+  "sentencepiece>=0.2.0",   # MarianTokenizer 必要
+  "OpenCC>=1.1.9",          # 繁→簡 t2s（官方 PyPI binding；reimplemented 版已無維護）
+  "sacremoses>=0.1.1",      # Marian detokenize 建議依賴
+]
 modal = ["modal>=0.64"]
 [build-system]
 requires = ["hatchling"]
