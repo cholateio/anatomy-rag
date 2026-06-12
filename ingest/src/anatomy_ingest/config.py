@@ -18,7 +18,7 @@ class IngestConfig:
     s3_secret_key: str
 
     @classmethod
-    def from_env(cls) -> "IngestConfig":
+    def from_env(cls) -> IngestConfig:
         def req(name: str) -> str:
             v = os.environ.get(name)
             if not v:
@@ -28,7 +28,7 @@ class IngestConfig:
         database_url = req("DATABASE_URL")
         port = urlparse(database_url).port
         if port != 6432:
-            # 與 backend config._must_use_pgbouncer 同準則：只接受 :6432（無 port / 其他 port 一律拒）
+            # 只接受 :6432（無 port / 其他 port 一律拒）
             raise ValueError(
                 f"ingest MUST 連 PgBouncer :6432（目前 port={port}）；禁止直連 :5432 或其他 port"
                 "（僅 Alembic migrations 用 PG_DIRECT_URL 直連 :5432）"

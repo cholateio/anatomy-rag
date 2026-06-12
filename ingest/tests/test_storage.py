@@ -1,7 +1,8 @@
 # ingest/tests/test_storage.py
 import io
-from PIL import Image
+
 from anatomy_ingest.storage import page_key, upload_page_png
+from PIL import Image
 
 
 def test_page_key_scheme():

@@ -1,6 +1,6 @@
 # ingest/tests/test_page_render.py
+from anatomy_ingest.page_render import MAX_LONG_EDGE, resize_long_edge
 from PIL import Image
-from anatomy_ingest.page_render import resize_long_edge, MAX_LONG_EDGE
 
 
 def test_resize_downscales_long_edge():

@@ -1,7 +1,7 @@
 # ingest/tests/test_types.py
 import numpy as np
 import pytest
-from anatomy_ingest.types import PageParse, EncodedPage
+from anatomy_ingest.types import EncodedPage, PageParse
 
 
 def test_pageparse_holds_fields():

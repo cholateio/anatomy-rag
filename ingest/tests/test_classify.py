@@ -1,7 +1,10 @@
 # ingest/tests/test_classify.py
-import pytest
 from anatomy_ingest.classify import (
-    ANATOMY_SYSTEMS, PAGE_TYPES, map_anatomy_system, classify_page_type, extract_figures,
+    ANATOMY_SYSTEMS,
+    PAGE_TYPES,
+    classify_page_type,
+    extract_figures,
+    map_anatomy_system,
 )
 
 

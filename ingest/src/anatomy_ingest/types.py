@@ -42,7 +42,7 @@ class EncodedPage:
     def n_patches(self) -> int:
         return len(self.patch_bins)
 
-    def validate(self) -> "EncodedPage":
+    def validate(self) -> EncodedPage:
         if not self.patch_bins:
             raise ValueError(f"page {self.page_num}: 無任何 patch")
         for i, b in enumerate(self.patch_bins):
