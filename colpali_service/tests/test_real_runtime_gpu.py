@@ -1,5 +1,7 @@
 """真實 ColPali runtime（gpu marker）：需 CUDA + gpu extra；CI 自動 skip。
 手動（GPU 容器內）：見 Makefile encoder-gate / SETUP.md。"""
+import os
+
 import numpy as np
 import pytest
 
@@ -42,9 +44,12 @@ def test_same_query_twice_same_shape_close_values(runtime):
     assert np.allclose(a.embeddings, b.embeddings, atol=5e-2)
 
 
+@pytest.mark.skipif(os.environ.get("ANATOMY_GPU_IMAGE") != "1",
+                    reason="版本鎖只對 GPU 容器組合有意義（容器 reinstall torch==2.11.* cu128；"
+                           "host venv 由 uv.lock 浮動，如 2.12+cu130）")
 def test_torch_and_transformers_are_validated_versions():
-    """torch/transformers 必須是本 phase 驗證過的組合。
-    lock 升版（如 transformers 5.11）會讓本測試紅 → 強制重跑 GPU 驗證後才能更新斷言。"""
+    """torch/transformers 必須是本 phase 在 GPU 容器驗證過的組合。
+    lock/映像升版會讓本測試紅 → 強制重跑 GPU 驗證後才能更新斷言。"""
     import transformers
 
     assert torch.__version__.startswith("2.11"), torch.__version__

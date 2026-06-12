@@ -4,7 +4,7 @@
 FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu22.04
 # UV_HTTP_TIMEOUT=600：cu128 的 GB 級 wheel（torch / nvidia-cudnn-cu12 等）在預設 30s 逾時下易斷，拉長至 10 分。
 ENV PYTHONUNBUFFERED=1 DEBIAN_FRONTEND=noninteractive ENCODER_MOCK=false COLPALI_DEVICE=cuda \
-    UV_NO_SYNC=1 UV_HTTP_TIMEOUT=600 HF_HOME=/hf-cache
+    UV_NO_SYNC=1 UV_HTTP_TIMEOUT=600 HF_HOME=/hf-cache ANATOMY_GPU_IMAGE=1
 RUN apt-get update && apt-get install -y --no-install-recommends \
       python3.11 python3.11-venv python3-pip git curl fonts-dejavu-core && rm -rf /var/lib/apt/lists/*
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
