@@ -241,10 +241,13 @@ class PageParse:
 
 @dataclass(frozen=True)
 class SourcePage:
-    """來源 producer 的單頁產物：解析結果 + 待編碼/上傳的頁面影像。"""
+    """來源 producer 的單頁產物：解析結果 + 待編碼/上傳的頁面影像。
+
+    image 可為 None：解析出該頁但渲染缺圖時（pdf_source 不靜默丟棄，由 cli 記 render 失敗）。
+    """
 
     parse: PageParse
-    image: Any  # PIL.Image.Image（避免在 types 引 pillow 型別）
+    image: Any  # PIL.Image.Image | None（避免在 types 引 pillow 型別）
 
 
 @dataclass(frozen=True)
@@ -916,8 +919,13 @@ def test_config_reads_env(monkeypatch):
     assert cfg.database_url.endswith("/anatomy_rag") and cfg.s3_bucket == "anatomy-rag-pages"
 
 
-def test_config_rejects_direct_5432(monkeypatch):
-    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@postgres:5432/anatomy_rag")
+@pytest.mark.parametrize("url", [
+    "postgresql://u:p@postgres:5432/anatomy_rag",   # 直連 Postgres
+    "postgresql://u:p@host/anatomy_rag",            # 無 port
+    "postgresql://u:p@host:6543/anatomy_rag",       # 其他 port（如 Supavisor）
+])
+def test_config_requires_port_6432(monkeypatch, url):
+    monkeypatch.setenv("DATABASE_URL", url)
     for k in ("S3_BUCKET", "S3_ENDPOINT", "S3_ACCESS_KEY", "S3_SECRET_KEY"):
         monkeypatch.setenv(k, "x")
     with pytest.raises(ValueError, match="6432|PgBouncer"):
@@ -968,9 +976,11 @@ class IngestConfig:
 
         database_url = req("DATABASE_URL")
         port = urlparse(database_url).port
-        if port == 5432:
+        if port != 6432:
+            # 與 backend config._must_use_pgbouncer 同準則：只接受 :6432（無 port / 其他 port 一律拒）
             raise ValueError(
-                "ingest MUST 連 PgBouncer :6432，禁止直連 :5432（僅 Alembic 用 PG_DIRECT_URL）"
+                f"ingest MUST 連 PgBouncer :6432（目前 port={port}）；禁止直連 :5432 或其他 port"
+                "（僅 Alembic migrations 用 PG_DIRECT_URL 直連 :5432）"
             )
         return cls(
             database_url=database_url,
@@ -1044,6 +1054,27 @@ def test_synthetic_source_deterministic_markdown():
     a = [sp.parse.markdown for sp in synthetic_source(2, meta)]
     b = [sp.parse.markdown for sp in synthetic_source(2, meta)]
     assert a == b
+
+
+def test_pdf_source_yields_none_image_for_missing_render(monkeypatch):
+    """渲染缺頁時 pdf_source 仍產出該頁（image=None），不靜默丟棄（Codex high #1）。"""
+    import anatomy_ingest.source as src
+    from anatomy_ingest.types import PageParse
+    from PIL import Image
+
+    parses = [
+        PageParse(page_num=1, markdown="p1", metadata={"page_num": 1}),
+        PageParse(page_num=2, markdown="p2", metadata={"page_num": 2}),
+        PageParse(page_num=3, markdown="p3", metadata={"page_num": 3}),
+    ]
+    monkeypatch.setattr(src, "convert_pdf", lambda path: object())
+    monkeypatch.setattr(src, "extract_pages", lambda doc, meta: parses)
+    # 只渲染出 1、3 頁（缺第 2 頁）
+    monkeypatch.setattr(src, "render_pdf_pages",
+                        lambda path: {1: Image.new("RGB", (4, 4)), 3: Image.new("RGB", (4, 4))})
+    out = list(src.pdf_source("x.pdf", {"book_title": "A"}))
+    assert [sp.parse.page_num for sp in out] == [1, 2, 3]  # 三頁都產出，無遺漏
+    assert out[1].image is None and out[0].image is not None and out[2].image is not None
 ```
 
 - [ ] **Step 2: 跑測試確認失敗**
@@ -1077,15 +1108,17 @@ _SYNTH_BODY = "Synthetic page {n}. The structure is described here. See Fig. {n}
 
 
 def pdf_source(pdf_path: str, book_meta: dict[str, Any]) -> Iterator[SourcePage]:
-    """真實路徑：PDF → SourcePage（解析 + 渲染對齊頁碼）。"""
+    """真實路徑：PDF → SourcePage（解析 + 渲染對齊頁碼）。
+
+    解析/渲染頁碼**對齊**：每個被解析出的頁都產出一個 SourcePage——若渲染缺該頁影像，
+    `image=None`（**不靜默丟棄**），由 cli 記 stage='render' 的 ingest_error 並計為失敗
+    （§2.7：單頁失敗須留痕，不可變成「成功的遺漏」）。
+    """
     doc = convert_pdf(pdf_path)
     parses = {p.page_num: p for p in extract_pages(doc, book_meta)}
     images = render_pdf_pages(pdf_path)
     for page_num in sorted(parses):
-        img = images.get(page_num)
-        if img is None:
-            continue  # 渲染缺頁：cli 會在 encode 階段不會收到此頁（解析/渲染不一致由 gate 抓）
-        yield SourcePage(parse=parses[page_num], image=img)
+        yield SourcePage(parse=parses[page_num], image=images.get(page_num))  # 缺圖→None，不丟棄
 
 
 def synthetic_source(n_pages: int, book_meta: dict[str, Any]) -> Iterator[SourcePage]:
@@ -1110,13 +1143,13 @@ def synthetic_source(n_pages: int, book_meta: dict[str, Any]) -> Iterator[Source
 - [ ] **Step 4: 跑測試確認通過**
 
 Run: `uv run --no-sync pytest ingest/tests/test_source.py -q`
-Expected: PASS（3 passed）
+Expected: PASS（4 passed）
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add ingest/src/anatomy_ingest/source.py ingest/tests/test_source.py
-git commit -m "feat(ingest): source（pdf_source 真實 + synthetic_source dev/CI 共用下游）"
+git commit -m "feat(ingest): source（pdf_source 真實 + synthetic_source dev/CI；缺渲染頁不丟棄）"
 ```
 
 ---
@@ -1279,6 +1312,38 @@ async def test_sample_verify_counts_match(conn):
     # 全抽（fraction=1.0）：每頁 patch 數應為 4
     report = await sample_verify(conn, book_id, KB, fraction=1.0, rng_seed=0)
     assert report["sampled"] == 4 and report["mismatches"] == []
+
+
+async def test_record_error_failure_does_not_lose_batch(conn, monkeypatch):
+    """記錯本身爆炸時，獨立 savepoint 保護同批已成功頁不被整批 rollback（Codex high #4）。"""
+    import anatomy_ingest.writer as w
+
+    book_id = await _new_book(conn)
+    await write_batch(conn, book_id, KB, [(_page_record(2), _enc(2))])  # 先塞 page 2 → 後續重複觸發失敗
+
+    async def boom(*a, **k):
+        raise RuntimeError("ingest_errors 寫入爆炸")
+
+    monkeypatch.setattr(w, "_record_error", boom)
+    batch = [(_page_record(1), _enc(1)), (_page_record(2), _enc(2)), (_page_record(3), _enc(3))]
+    outcome = await write_batch(conn, book_id, KB, batch)
+    assert sorted(outcome.written) == [1, 3] and outcome.failed == [2]
+    rows = await conn.fetch(
+        "SELECT page_num FROM pages WHERE kb_version=$1 AND book_id=$2", KB, book_id)
+    assert {r["page_num"] for r in rows} == {1, 2, 3}  # 1、3 仍提交，未因記錯爆炸而整批丟失
+
+
+async def test_record_error_clamps_invalid_page_num_to_null(conn):
+    """page_num<1 違反 pages CHECK → 記錯時 clamp 為 NULL（book 層），ingest_errors 插入不自爆。"""
+    book_id = await _new_book(conn)
+    bad = dict(_page_record(1))
+    bad["page_num"] = -5  # 違反 pages CHECK(page_num>=1)
+    outcome = await write_batch(conn, book_id, KB, [(bad, _enc(1)), (_page_record(7), _enc(7))])
+    assert outcome.failed == [-5] and outcome.written == [7]
+    err = await conn.fetchrow(
+        "SELECT page_num, stage FROM ingest_errors WHERE kb_version=$1 AND book_id=$2"
+        " ORDER BY error_id DESC LIMIT 1", KB, book_id)
+    assert err["page_num"] is None and err["stage"] == "write"
 ```
 
 - [ ] **Step 3: 跑測試確認失敗**
@@ -1299,6 +1364,7 @@ patch_bin 綁定 to_pg_bits + ::text::bit(128)；pooled 綁定 ::halfvec（§4.4
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import numpy as np
@@ -1306,6 +1372,8 @@ import numpy as np
 from anatomy_shared.binary import to_pg_bits
 
 from .types import EncodedPage, WriteOutcome
+
+logger = logging.getLogger(__name__)
 
 
 def _pooled_to_halfvec_literal(pooled: np.ndarray) -> str:
@@ -1357,12 +1425,32 @@ async def _insert_page(conn, book_id, kb_version: int, rec: dict[str, Any], enc:
     )
 
 
-async def _record_error(conn, book_id, kb_version: int, page_num: int, exc: Exception):
+async def _record_error(conn, book_id, kb_version: int, page_num, exc: Exception,
+                        stage: str = "write"):
+    """寫 ingest_errors。page_num<1（違反 CHECK）改記為 NULL（book 層）以免插入自身失敗。
+
+    stage 可為 parse/render/encode/upload/write（§3.2 CHECK）；供 cli 上游階段共用。
+    """
+    safe_page = page_num if (isinstance(page_num, int) and page_num >= 1) else None
     await conn.execute(
         "INSERT INTO ingest_errors (kb_version, book_id, page_num, stage, error_type, message, detail)"
-        " VALUES ($1, $2, $3, 'write', $4, $5, $6::jsonb)",
-        kb_version, book_id, page_num, type(exc).__name__, str(exc)[:2000], json.dumps({}),
+        " VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)",
+        kb_version, book_id, safe_page, stage, type(exc).__name__, str(exc)[:2000], json.dumps({}),
     )
+
+
+async def record_page_error(conn, book_id, kb_version: int, page_num, exc: Exception,
+                            stage: str) -> None:
+    """獨立短交易寫 stage-specific ingest_errors（cli 的 encode/upload 階段用；不在 write_batch 交易內）。"""
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        await _record_error(conn, book_id, kb_version, page_num, exc, stage=stage)
+        await tx.commit()
+    except Exception as rec_exc:
+        await tx.rollback()
+        logger.error("寫 ingest_errors 失敗（stage=%s page=%s）：原始=%r 記錯=%r",
+                     stage, page_num, exc, rec_exc)
 
 
 async def write_batch(conn, book_id, kb_version: int,
@@ -1385,9 +1473,19 @@ async def write_batch(conn, book_id, kb_version: int,
                 await _insert_page(conn, book_id, kb_version, rec, enc)
                 await conn.execute(f"RELEASE SAVEPOINT {sp}")
                 written.append(page_num)
-            except Exception as exc:  # 單頁失敗：回退此頁、記錯、續下一頁
+            except Exception as exc:  # 單頁失敗：回退此頁、記錯（自身再包 savepoint）、續下一頁
                 await conn.execute(f"ROLLBACK TO SAVEPOINT {sp}")
-                await _record_error(conn, book_id, kb_version, page_num, exc)
+                # 記錯包進獨立 savepoint：連寫 ingest_errors 都失敗（如 page_num 違反同一 CHECK）
+                # 時 ROLLBACK TO 該 savepoint，**不波及同批已成功的頁**（Codex high #4）。
+                esp = f"sp_err_{idx}"
+                await conn.execute(f"SAVEPOINT {esp}")
+                try:
+                    await _record_error(conn, book_id, kb_version, page_num, exc)
+                    await conn.execute(f"RELEASE SAVEPOINT {esp}")
+                except Exception as rec_exc:
+                    await conn.execute(f"ROLLBACK TO SAVEPOINT {esp}")
+                    logger.error("寫 ingest_errors 失敗（page=%s）：原始=%r 記錯=%r",
+                                 page_num, exc, rec_exc)
                 failed.append(page_num)
         await tx.commit()
     except Exception:
@@ -1430,7 +1528,7 @@ PG_DIRECT_URL=postgresql://anatomy:anatomy_dev_pw@localhost:5432/anatomy_rag \
 ANATOMY_DB_TESTS_ALLOW_DESTRUCTIVE=1 \
 uv run --no-sync pytest ingest/tests/test_writer_db.py -q
 ```
-Expected: PASS（5 passed）
+Expected: PASS（7 passed）
 
 > `test_savepoint_isolates_failed_page` 的最終斷言放寬為「集合 == {1,2,3}」即可（IN 不保序，排序斷言用集合）。若 asyncpg savepoint 名稱衝突，確認每頁用唯一 `sp_{idx}`。
 
@@ -1460,7 +1558,11 @@ git commit -m "feat(ingest): writer 批交易+每頁 savepoint+ingest_errors+res
 
 ```python
 # ingest/tests/test_cli.py
+import subprocess
+import sys
+
 import pytest
+
 from anatomy_ingest.cli import build_parser, chunk_pages, plan_pages
 from anatomy_ingest.source import synthetic_source
 
@@ -1468,14 +1570,26 @@ from anatomy_ingest.source import synthetic_source
 def test_parser_required_args():
     p = build_parser()
     ns = p.parse_args(["--pdf", "x.pdf", "--book-meta", "x.yaml", "--kb-version", "3"])
-    assert ns.kb_version == 3 and ns.batch_size == 8 and ns.resume is False
+    assert ns.kb_version == 3 and ns.batch_size == 8 and ns.resume is False and ns.book_id is None
 
 
 def test_parser_flags():
     p = build_parser()
     ns = p.parse_args(["--synthetic", "5", "--book-meta", "x.yaml", "--kb-version", "1",
-                       "--batch-size", "2", "--resume"])
-    assert ns.synthetic == 5 and ns.batch_size == 2 and ns.resume is True
+                       "--batch-size", "2", "--resume", "--book-id", "b-123"])
+    assert ns.synthetic == 5 and ns.batch_size == 2 and ns.resume is True and ns.book_id == "b-123"
+
+
+@pytest.mark.parametrize("args", [
+    ["--synthetic", "0", "--book-meta", "x.yaml", "--kb-version", "1"],    # synthetic 0
+    ["--synthetic", "-3", "--book-meta", "x.yaml", "--kb-version", "1"],   # 負
+    ["--synthetic", "2", "--book-meta", "x.yaml", "--kb-version", "0"],    # kb 0
+    ["--synthetic", "2", "--book-meta", "x.yaml", "--kb-version", "1", "--batch-size", "0"],  # batch 0
+])
+def test_parser_rejects_nonpositive_ints(args):
+    with pytest.raises(SystemExit) as e:
+        build_parser().parse_args(args)
+    assert e.value.code == 2  # argparse 參數錯誤退碼 2
 
 
 def test_chunk_pages():
@@ -1488,6 +1602,29 @@ def test_plan_pages_resume_skips_completed():
     todo, skipped = plan_pages(pages, completed={2, 3})
     assert [sp.parse.page_num for sp in todo] == [1, 4]
     assert skipped == [2, 3]
+
+
+def test_help_exits_0_without_optional_deps(monkeypatch):
+    """`--help` 不得因 import asyncpg/yaml/docling 等重依賴而失敗（Codex high #7）：
+    隱藏這些模組仍要能印 usage。子行程驗證 import 鏈確實 dependency-light。"""
+    code = (
+        "import sys, builtins\n"
+        "real_import = builtins.__import__\n"
+        "blocked = {'asyncpg','yaml','docling','pdf2image','boto3','torch','transformers'}\n"
+        "def guard(name, *a, **k):\n"
+        "    if name.split('.')[0] in blocked: raise ImportError('blocked '+name)\n"
+        "    return real_import(name, *a, **k)\n"
+        "builtins.__import__ = guard\n"
+        "from anatomy_ingest.cli import main\n"
+        "sys.argv=['x','--help']\n"
+        "try:\n"
+        "    main()\n"
+        "except SystemExit as e:\n"
+        "    sys.exit(e.code or 0)\n"
+    )
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert r.returncode == 0, f"--help 應退 0；stderr={r.stderr}"
+    assert "usage" in r.stdout.lower()
 ```
 
 - [ ] **Step 2: 跑測試確認失敗**
@@ -1497,12 +1634,18 @@ Expected: FAIL（`No module named 'anatomy_ingest.cli'`）
 
 - [ ] **Step 3: 實作 `ingest/src/anatomy_ingest/cli.py`**
 
+> **重要（Codex high #7）**：`cli.py` **頂層只 import 輕量項**（argparse/asyncio/dataclasses/sys/typing）。
+> 所有重依賴（asyncpg/yaml/get_runtime/source/storage/writer/config）一律 **lazy import 進 `_run`**——
+> 讓 `--help` 在缺 poppler/torch/asyncpg 的部分佈建環境仍可印 usage。`build_parser`/`chunk_pages`/
+> `plan_pages` 為純函式，不得依賴重模組。
+
 ```python
 # ingest/src/anatomy_ingest/cli.py
 """離線建庫 CLI（§2.6）。MUST NOT 呼叫任何雲端 LLM API（離線紅線；test_no_cloud_llm 守門）。
 
-流程（每批）：來源頁 → encode（GPU/mock，交易外）→ 上傳 PNG（交易外）→ write_batch（短交易）。
-編碼前依 --resume 跳過已完成頁。全部批後做 5% 抽樣校驗。
+流程（每批）：來源頁 → encode（GPU/mock，交易外，逐頁 guard）→ 上傳 PNG（交易外，逐頁 guard）
+→ write_batch（短交易，'write' 階段 savepoint）。各上游階段（render/encode/upload）失敗逐頁寫
+stage-specific ingest_errors 並續跑（§2.7）。書本識別走顯式 --book-id（§2.6 重建/續跑），不靠 title 猜測。
 """
 from __future__ import annotations
 
@@ -1512,28 +1655,32 @@ import dataclasses
 import sys
 from typing import Any
 
-import asyncpg
-import yaml
 
-from anatomy_shared.colpali_runtime import get_runtime
-
-from .colpali_encoder import encode_page_image
-from .config import IngestConfig
-from .source import pdf_source, synthetic_source
-from .storage import page_key, upload_page_png
-from .types import SourcePage
-from .writer import completed_page_nums, ensure_kb_partition, sample_verify, write_batch
+def _positive_int(value: str) -> int:
+    """argparse type：正整數（>=1）；0/負/非整數 → argparse 退碼 2（Codex medium #8）。"""
+    try:
+        iv = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"須為整數，收到 {value!r}")
+    if iv < 1:
+        raise argparse.ArgumentTypeError(f"須為正整數（>=1），收到 {iv}")
+    return iv
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="anatomy_ingest.cli", description="離線建庫管線")
     src = p.add_mutually_exclusive_group(required=True)
     src.add_argument("--pdf", help="教科書 PDF 路徑（真實路徑，需 poppler + docling）")
-    src.add_argument("--synthetic", type=int, metavar="N", help="合成 N 頁（dev/CI，無 poppler/GPU）")
+    src.add_argument("--synthetic", type=_positive_int, metavar="N",
+                     help="合成 N 頁（dev/CI，無 poppler/GPU）")
     p.add_argument("--book-meta", required=True, help="書籍 metadata YAML")
-    p.add_argument("--kb-version", type=int, required=True)
-    p.add_argument("--batch-size", type=int, default=8)
-    p.add_argument("--resume", action="store_true", help="跳過 pages 已存在的頁")
+    p.add_argument("--kb-version", type=_positive_int, required=True)
+    p.add_argument("--batch-size", type=_positive_int, default=8)
+    p.add_argument("--book-id", default=None,
+                   help="既有 book_id（UUID）：重建（無 --resume：先刪該 book+kb_version 既有頁）"
+                        "或續跑（--resume：跳過已完成頁）。首次建庫不帶此旗標→新增一本書。")
+    p.add_argument("--resume", action="store_true",
+                   help="跳過 pages 已存在的頁（須搭 --book-id；不靠 title 猜書）")
     p.add_argument("--mock-encoder", action="store_true", help="用決定性 mock runtime（CI/無 GPU）")
     return p
 
@@ -1542,35 +1689,122 @@ def chunk_pages(items: list[Any], size: int) -> list[list[Any]]:
     return [items[i : i + size] for i in range(0, len(items), size)]
 
 
-def plan_pages(pages: list[SourcePage], completed: set[int]) -> tuple[list[SourcePage], list[int]]:
+def plan_pages(pages, completed: set[int]):
     todo = [sp for sp in pages if sp.parse.page_num not in completed]
     skipped = sorted(sp.parse.page_num for sp in pages if sp.parse.page_num in completed)
     return todo, skipped
 
 
 def _load_book_meta(path: str) -> dict[str, Any]:
+    import yaml  # lazy
+
     with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
 
 
+async def _resolve_book(conn, ns, book_meta: dict[str, Any]):
+    """書本識別（§2.6，Codex high #3）：
+
+    - 帶 --book-id：書須存在。無 --resume＝重建 → 先 DELETE pages（cascade page_patches）；
+      --resume → 不刪、回傳既有 book_id 供跳過已完成頁。
+    - 不帶 --book-id：--resume 為非法（不靠 title 猜書）；否則新增一本書（首次建庫）。
+    """
+    if ns.book_id:
+        import uuid
+
+        try:
+            book_uuid = uuid.UUID(str(ns.book_id))
+        except ValueError:
+            raise SystemExit(f"--book-id 非合法 UUID：{ns.book_id!r}")
+        exists = await conn.fetchval("SELECT 1 FROM books WHERE book_id = $1", book_uuid)
+        if not exists:
+            raise SystemExit(f"--book-id {ns.book_id} 不存在；首次建庫請不帶 --book-id")
+        if not ns.resume:
+            # §2.6 重新執行：先刪該書該版本既有頁（page_patches 經 ON DELETE CASCADE 連帶刪）
+            await conn.execute(
+                "DELETE FROM pages WHERE book_id = $1 AND kb_version = $2", book_uuid, ns.kb_version)
+            print(f"[rebuild] 已刪除 book={ns.book_id} kb_version={ns.kb_version} 既有頁，重建")
+        return book_uuid
+    if ns.resume:
+        raise SystemExit("--resume 須搭配 --book-id（不靠 title 猜書，避免續跑到錯的書/版本）")
+    book_uuid = await conn.fetchval(
+        "INSERT INTO books (title, edition, isbn) VALUES ($1, $2, $3) RETURNING book_id",
+        book_meta.get("book_title") or "Untitled",
+        str(book_meta.get("edition") or ""), book_meta.get("isbn"),
+    )
+    print(f"[new] 新增書本 book_id={book_uuid}")
+    return book_uuid
+
+
+async def _encode_and_upload_batch(runtime, s3, cfg, book_id, kb_version, conn, batch_pages):
+    """逐頁 encode + upload，各階段失敗寫 stage-specific ingest_errors 並續跑（Codex high #1/#2）。
+
+    回 (records, failed_page_nums)：records 為通過 encode+upload、待 write_batch 的 (rec, enc)。
+    """
+    from .colpali_encoder import encode_page_image
+    from .storage import page_key, upload_page_png
+    from .writer import record_page_error
+
+    records, failed = [], []
+    for sp in batch_pages:
+        pn = sp.parse.page_num
+        if sp.image is None:  # 渲染缺頁（pdf_source 未丟棄）→ 記 render 失敗，跳過
+            await record_page_error(conn, book_id, kb_version, pn, RuntimeError("render 缺頁影像"), "render")
+            failed.append(pn)
+            continue
+        try:
+            enc = encode_page_image(runtime, sp.image)
+            enc = dataclasses.replace(enc, page_num=pn)
+        except Exception as exc:
+            await record_page_error(conn, book_id, kb_version, pn, exc, "encode")
+            failed.append(pn)
+            continue
+        try:
+            key = page_key(kb_version, str(book_id), pn)
+            uri = upload_page_png(s3, cfg.s3_bucket, key, sp.image)
+        except Exception as exc:
+            await record_page_error(conn, book_id, kb_version, pn, exc, "upload")
+            failed.append(pn)
+            continue
+        records.append(({
+            "page_num": pn,
+            "page_image_uri": uri,
+            "docling_md": sp.parse.markdown,
+            "metadata": sp.parse.metadata,
+        }, enc))
+    return records, failed
+
+
 async def _run(ns: argparse.Namespace) -> int:
+    import asyncpg
+
+    from anatomy_shared.colpali_runtime import get_runtime
+
+    from .config import IngestConfig
+    from .source import pdf_source, synthetic_source
+    from .writer import (
+        completed_page_nums, ensure_kb_partition, record_page_error, sample_verify, write_batch,
+    )
+
     cfg = IngestConfig.from_env()
     book_meta = _load_book_meta(ns.book_meta)
     runtime = get_runtime(mock=ns.mock_encoder or bool(ns.synthetic))
-
-    if ns.synthetic:
-        pages = list(synthetic_source(ns.synthetic, book_meta))
-    else:
-        pages = list(pdf_source(ns.pdf, book_meta))
-
     s3 = cfg.make_s3_client()
     conn = await asyncpg.connect(cfg.database_url, statement_cache_size=0)
     try:
         await ensure_kb_partition(conn, ns.kb_version)
-        book_id = await conn.fetchval(
-            "INSERT INTO books (title, edition) VALUES ($1, $2) RETURNING book_id",
-            book_meta.get("book_title") or "Untitled", str(book_meta.get("edition") or ""),
-        ) if not ns.resume else await _resolve_book_id(conn, book_meta)
+        book_id = await _resolve_book(conn, ns, book_meta)
+
+        # 來源段（parse/render 為整檔操作）：整檔失敗記 book 層 parse 錯誤、非零退出（§2.7）
+        try:
+            if ns.synthetic:
+                pages = list(synthetic_source(ns.synthetic, book_meta))
+            else:
+                pages = list(pdf_source(ns.pdf, book_meta))
+        except Exception as exc:
+            await record_page_error(conn, book_id, ns.kb_version, None, exc, "parse")
+            print(f"[fatal] 來源解析/渲染失敗：{exc!r}（已記 ingest_errors stage=parse）")
+            return 1
 
         completed = await completed_page_nums(conn, book_id, ns.kb_version) if ns.resume else set()
         todo, skipped = plan_pages(pages, completed)
@@ -1579,40 +1813,19 @@ async def _run(ns: argparse.Namespace) -> int:
 
         total_written, total_failed = [], []
         for batch_pages in chunk_pages(todo, ns.batch_size):
-            records = []
-            for sp in batch_pages:
-                enc = encode_page_image(runtime, sp.image)
-                enc = dataclasses.replace(enc, page_num=sp.parse.page_num)
-                key = page_key(ns.kb_version, str(book_id), sp.parse.page_num)
-                uri = upload_page_png(s3, cfg.s3_bucket, key, sp.image)
-                rec = {
-                    "page_num": sp.parse.page_num,
-                    "page_image_uri": uri,
-                    "docling_md": sp.parse.markdown,
-                    "metadata": sp.parse.metadata,
-                }
-                records.append((rec, enc))
+            records, up_failed = await _encode_and_upload_batch(
+                runtime, s3, cfg, book_id, ns.kb_version, conn, batch_pages)
+            total_failed += up_failed
             outcome = await write_batch(conn, book_id, ns.kb_version, records)
             total_written += outcome.written
             total_failed += outcome.failed
-            print(f"[batch] 寫入 {outcome.written}，失敗 {outcome.failed}")
+            print(f"[batch] 寫入 {outcome.written}，失敗 寫={outcome.failed} 上游={up_failed}")
 
         report = await sample_verify(conn, book_id, ns.kb_version, fraction=0.05)
-        print(f"[done] 共寫入 {len(total_written)} 頁、失敗 {len(total_failed)} 頁；"
-              f"抽樣校驗 {report}")
+        print(f"[done] 共寫入 {len(total_written)} 頁、失敗 {len(total_failed)} 頁；抽樣校驗 {report}")
         return 1 if (total_failed or report["mismatches"]) else 0
     finally:
         await conn.close()
-
-
-async def _resolve_book_id(conn, book_meta: dict[str, Any]):
-    bid = await conn.fetchval(
-        "SELECT book_id FROM books WHERE title = $1 ORDER BY added_at DESC LIMIT 1",
-        book_meta.get("book_title") or "Untitled",
-    )
-    if bid is None:
-        raise SystemExit("--resume 找不到既有 book（title 不符）；請不帶 --resume 重新建庫")
-    return bid
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1627,13 +1840,13 @@ if __name__ == "__main__":
 - [ ] **Step 4: 跑測試確認通過**
 
 Run: `uv run --no-sync pytest ingest/tests/test_cli.py -q`
-Expected: PASS（4 passed）
+Expected: PASS（9 passed）
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add ingest/src/anatomy_ingest/cli.py ingest/tests/test_cli.py
-git commit -m "feat(ingest): cli 編排（resume/batch/5% 抽樣/mock-encoder；交易外編碼上傳）"
+git commit -m "feat(ingest): cli 編排（顯式 book-id/§2.6 重建/逐頁 stage 失敗留痕/輕量 --help/正整數驗證）"
 ```
 
 ---
@@ -1792,30 +2005,41 @@ edition: 1
 
 ```python
 # ingest/scripts/ingest_gate.py
-"""手動 GPU gate：真 1 頁 PDF → real ColPali → 真 MinIO/PG 端到端建庫驗收（非 CI）。
+"""手動 GPU gate：真 3 頁 PDF → real ColPali → 真 MinIO/PG 端到端建庫驗收（非 CI）。
 
 前置：poppler 已裝、GPU venv 有 torch+colpali、make up + make migrate 已跑、.env 指 localhost。
-產生一張臨時單頁 PDF（PIL），走完整 pdf_source（docling+poppler+real runtime）→ 寫 kb_version=9000。
-驗收：pages=1、page_patches>0、PNG 在 MinIO、metadata 規範化。完成後清理該 kb_version。
+產生 3 頁可區辨 PDF（PIL），走完整 pdf_source（docling+poppler+real runtime）→ 寫 kb_version=9000。
+驗收（Codex medium #6）：
+- pages.page_num 集合 == {1,2,3}（解析/渲染/DB 頁碼精確對應，抓 docling/pdf2image 頁碼漂移）
+- 每頁 page_patches>0、embed_model=vidore/colpali-v1.3-hf
+- **逐頁 GET MinIO 物件**確認存在且為 PNG（非只數 DB 列）
+完成後清理該 kb_version + book。
 """
 import asyncio
+import io
 import os
 import tempfile
 
 import asyncpg
 from PIL import Image, ImageDraw
 
-from anatomy_ingest.cli import build_parser, _run  # 重用編排
+from anatomy_ingest.cli import _run, build_parser  # 重用編排
+from anatomy_ingest.config import IngestConfig
 
 KB = 9000
+N_PAGES = 3
 
 
 def _make_pdf(path: str):
-    img = Image.new("RGB", (1240, 1754), "white")  # ~150dpi A4
-    d = ImageDraw.Draw(img)
-    d.text((80, 80), "Chapter: Upper Limb", fill="black")
-    d.text((80, 140), "The brachial plexus innervates the upper limb. See Fig. 7-23.", fill="black")
-    img.save(path, "PDF", resolution=200.0)
+    pages = []
+    chapters = ["Upper Limb", "The Heart", "Cranial Nerves"]
+    for i, chap in enumerate(chapters, start=1):
+        img = Image.new("RGB", (1240, 1754), "white")  # ~150dpi A4
+        d = ImageDraw.Draw(img)
+        d.text((80, 80), f"Chapter: {chap}", fill="black")
+        d.text((80, 140), f"This is distinguishable page {i}. See Fig. {i}-1.", fill="black")
+        pages.append(img)
+    pages[0].save(path, "PDF", resolution=200.0, save_all=True, append_images=pages[1:])
 
 
 async def main():
@@ -1824,6 +2048,7 @@ async def main():
     os.environ.setdefault("S3_BUCKET", "anatomy-rag-pages")
     os.environ.setdefault("S3_ACCESS_KEY", "minioadmin")
     os.environ.setdefault("S3_SECRET_KEY", "minioadmin")
+    cfg = IngestConfig.from_env()
 
     with tempfile.TemporaryDirectory() as td:
         pdf = os.path.join(td, "gate.pdf")
@@ -1832,23 +2057,35 @@ async def main():
         with open(meta, "w") as f:
             f.write("book_title: Gate Atlas\nedition: 1\n")
         ns = build_parser().parse_args(
-            ["--pdf", pdf, "--book-meta", meta, "--kb-version", str(KB), "--batch-size", "4"]
+            ["--pdf", pdf, "--book-meta", meta, "--kb-version", str(KB), "--batch-size", "2"]
         )
         rc = await _run(ns)
 
     conn = await asyncpg.connect(os.environ["DATABASE_URL"], statement_cache_size=0)
+    s3 = cfg.make_s3_client()
     try:
-        n_pages = await conn.fetchval("SELECT count(*) FROM pages WHERE kb_version=$1", KB)
-        n_patches = await conn.fetchval("SELECT count(*) FROM page_patches WHERE kb_version=$1", KB)
-        meta_row = await conn.fetchrow(
-            "SELECT metadata, embed_model FROM pages WHERE kb_version=$1 LIMIT 1", KB)
-        print(f"[gate] rc={rc} pages={n_pages} patches={n_patches}")
-        print(f"[gate] embed_model={meta_row['embed_model']} metadata={meta_row['metadata']}")
-        assert n_pages == 1 and n_patches > 0, "頁數/ patch 數不符"
-        assert meta_row["embed_model"] == "vidore/colpali-v1.3-hf", "embed_model 應為真實模型"
-        print("[gate] PASS — 清理測試 kb_version")
-        await conn.execute("DELETE FROM page_patches WHERE kb_version=$1", KB)
-        await conn.execute("DELETE FROM pages WHERE kb_version=$1", KB)
+        rows = await conn.fetch(
+            "SELECT page_num, page_image_uri, embed_model,"
+            " (SELECT count(*) FROM page_patches pp WHERE pp.kb_version=p.kb_version"
+            "  AND pp.page_id=p.page_id) AS n_patches"
+            " FROM pages p WHERE kb_version=$1 ORDER BY page_num", KB)
+        page_nums = [r["page_num"] for r in rows]
+        print(f"[gate] rc={rc} page_nums={page_nums}")
+        assert page_nums == list(range(1, N_PAGES + 1)), f"頁碼對應不符：{page_nums}"
+        for r in rows:
+            assert r["n_patches"] > 0, f"page {r['page_num']} 無 patch"
+            assert r["embed_model"] == "vidore/colpali-v1.3-hf", "embed_model 應為真實模型"
+            # 逐頁 GET MinIO 物件並驗 PNG
+            key = r["page_image_uri"].split(f"{cfg.s3_bucket}/", 1)[1]
+            obj = s3.get_object(Bucket=cfg.s3_bucket, Key=key)
+            data = obj["Body"].read()
+            assert Image.open(io.BytesIO(data)).format == "PNG", f"page {r['page_num']} MinIO 物件非 PNG"
+            print(f"[gate] page {r['page_num']} patches={r['n_patches']} png={len(data)}B OK")
+        print("[gate] PASS — 清理測試資料")
+        book_ids = await conn.fetch("SELECT DISTINCT book_id FROM pages WHERE kb_version=$1", KB)
+        await conn.execute("DELETE FROM pages WHERE kb_version=$1", KB)  # page_patches cascade
+        for b in book_ids:
+            await conn.execute("DELETE FROM books WHERE book_id=$1", b["book_id"])
     finally:
         await conn.close()
 
@@ -1901,7 +2138,7 @@ PG_DIRECT_URL=postgresql://anatomy:anatomy_dev_pw@localhost:5432/anatomy_rag \
 ANATOMY_DB_TESTS_ALLOW_DESTRUCTIVE=1 \
 uv run --no-sync pytest ingest/tests -q -m db
 ```
-Expected: PASS（writer 5 測試）
+Expected: PASS（writer 7 測試）
 
 - [ ] **Step 3: lint + 既有套件未破壞**
 
@@ -1933,18 +2170,33 @@ Expected: `[gate] PASS`（pages=1、patches>0、embed_model=vidore/colpali-v1.3-
 - §2.3 ColPali `encode_pages` + embed_model 記錄 → Task 6/11 ✓
 - §2.4 共用二值化（binarize/pool_patches 來自 shared、valid_mask 一致排除）→ Task 6 ✓（CI 單一來源守門 Task 14）
 - §2.5 寫入帶 kb_version、patches 批次插入 → Task 10 ✓
-- §2.6 CLI（--pdf/--book-meta/--kb-version/--batch-size/--resume）→ Task 11 ✓
-- §2.7 單頁失敗寫 ingest_errors 不中斷 + --resume + 5% 抽樣校驗 → Task 10/11 ✓
+- §2.6 CLI（--pdf/--book-meta/--kb-version/--batch-size/--resume/--book-id）→ Task 11 ✓
+- §2.6 重新執行先 DELETE FROM pages WHERE book_id+kb_version → Task 11 `_resolve_book`（--book-id 無 --resume=重建）✓
+- §2.7 單頁失敗寫 ingest_errors 不中斷（render/encode/upload/write 各階段）+ --resume + 5% 抽樣校驗 → Task 10/11 ✓
 - DL-023 批交易 + 每頁 savepoint + :6432 → Task 1/10 ✓
 - 紅線「離線管線 MUST NOT 呼叫雲端 LLM」→ Task 12 守門 ✓
 - PNG 上 MinIO（依賴 minio-init bucket）→ Task 7/11 ✓
 - 「無雲端 LLM 呼叫（網路 mock）」測試 → Task 12 socket guard ✓
 
-## 風險與待 review 重點（交 Codex 對抗式審查）
+## Codex 對抗式審查處置（2026-06-13 第一輪，writer=Claude / reviewer=Codex，真正跨模型隔離）
 
-1. **savepoint 後寫 ingest_errors 的健全性**：`ROLLBACK TO SAVEPOINT` 後該交易仍可寫 ingest_errors；若 `_record_error` 本身失敗（如 detail 過長）會中止整批——需 review 是否該對 `_record_error` 再包一層 savepoint。
-2. **批交易在 PgBouncer transaction pooling 下的長度**：編碼已移到交易外，交易僅含 INSERT；但大 batch_size × ~1024 patch/頁 的 executemany 仍可能偏長——review batch_size 上限建議。
-3. **`--resume` 的 book_id 解析**：以 title 取最近一本，重名書有歧義；review 是否需 `--book-id` 顯式參數。
-4. **halfvec 字面值精度**：`%.7g` float32 → halfvec(fp16)，review 是否足夠且與 Phase 5 query 端格式一致（未來抽 shared）。
-5. **page_type / anatomy_system 啟發式覆蓋率**：關鍵字表不全，Phase 11 真實教材再校；review 是否需在 metadata 標記「low-confidence」。
-6. **unit job 是否裝得起 docling**（重依賴）→ Task 12 Step 3 註記的 fallback（ingest 測試改掛 db-integration job）。
+審查 verdict=needs-attention，8 項全採納並已併入上方 Task（無一挑戰架構前提；皆健全性/正確性缺口）：
+
+| # | 嚴重度 | 問題 | 處置（Task） |
+|---|---|---|---|
+| 1 | high | `pdf_source` 渲染缺頁靜默丟棄 → 成功的遺漏 | image=None 不丟棄 + cli 記 stage='render'（Task 9/11）+ 對齊測試 |
+| 2 | high | parse/render/encode/upload 失敗繞過逐頁恢復 | `_encode_and_upload_batch` 逐頁 guard + `record_page_error` stage-specific + 整檔 parse 失敗記 book 層（Task 10/11） |
+| 3 | high | book 識別：重跑重複、resume 靠 title 猜錯書 | 顯式 `--book-id`（UUID 驗證）；無旗標=新書、帶旗標無 --resume=§2.6 DELETE 重建、--resume 須搭 --book-id（Task 11） |
+| 4 | high | 記錯本身失敗會 rollback 整批成功頁 | `_record_error` clamp page_num<1→NULL + write_batch 記錯包獨立 savepoint（Task 10）+ 2 個新 db 測試 |
+| 5 | medium | config 只擋 5432、無 port/他 port 漏網 | 改 `port != 6432` 一律拒（對齊 backend validator）+ 參數化測試（Task 8） |
+| 6 | medium | 單頁 GPU gate 抓不到頁碼漂移、未真讀 MinIO | 3 頁可區辨 fixture + 頁碼精確對應斷言 + 逐頁 GET MinIO 驗 PNG（Task 13） |
+| 7 | high | cli `--help` 急切 import 重依賴 → 部分佈建環境失敗 | 頂層只輕量 import、重依賴 lazy 進 `_run` + 子行程 `--help` 退 0 測試（Task 11） |
+| 8 | medium | 數值參數未驗證（batch=0 崩、負數靜默空跑） | `_positive_int` argparse type + 參數化「退碼 2」測試（Task 11） |
+
+## 風險與待後續處理（非阻斷）
+
+1. **批交易在 PgBouncer transaction pooling 下的長度**：編碼/上傳已移到交易外，交易僅含 INSERT；大 batch_size × ~1024 patch/頁 的 executemany 仍可能偏長——實作時 batch_size 預設 8，真實教材壓測再調（Phase 13）。
+2. **halfvec 字面值精度**：`%.7g` float32 → halfvec(fp16)；Phase 5 query 端若需同格式應抽到 shared 統一（目前離線端唯一使用點，docstring 已註）。
+3. **page_type / anatomy_system 啟發式覆蓋率**：關鍵字表不全，Phase 11 真實教材再校（可在 metadata 標 low-confidence，留待 Phase 11）。
+4. **unit job 是否裝得起 docling**（重依賴）→ Task 12 Step 3 註記的 fallback（ingest 測試改掛 db-integration job；以實測決定並於 commit 註明）。
+5. **第二輪 Codex 複審**：本次修訂涉及 cli/writer 大改，實作完成後的 phase-level review（Task 10 Step 8）與 final review 仍走 Codex，確認修訂未引入新問題。
