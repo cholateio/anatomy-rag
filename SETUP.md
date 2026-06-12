@@ -247,6 +247,10 @@ make encoder-gate
 
 - ✅ **成功應看到**：`encoder-gate` 結尾 `GATE PASS`（exit 0）。
   - gate 行為：16 偽頁面 + 24 題 zh/en，MaxSim 與 pooled cosine 雙軌 recall@3 皆須過門檻（en ≥ 0.9/0.75、zh ≥ 0.75/0.6）。
+  - 實測基準（2026-06-13，RTX 5060 Ti/WSL2）：**四軌 recall@3 全為 1.000**；`encode_query`
+    延遲（含 MT）p50=56ms／max=140ms；模型載入 12.5s（權重已快取）。gpu 測試 6/6、mt 測試 2/2 通過。
+  - 已知 MT 粗糙點（gate 已吸收、Phase 11 真實教材 gate 再校）：裸 Marian 對單字/碎片段
+    品質差（如「幹」「韌帶」誤譯）；glossary 詞條命中者不受影響。
 - ❌ gate 失敗：先看每題印出的 `translated_q` 品質（MT 問題 → 補 `colpali_service/glossary_zh_en.tsv` 詞條後重跑）；仍不過 → 依 DL-020 升級序（NLLB-600M → 跨語言 encoder）回報專案負責人裁決。**門檻不可為過關調低**（調整須附理由記入 PR）。
 - 📝 與 `make up-gpu` 的服務容器同時跑會雙載模型（~13 GB VRAM）；16 GB 卡可行，VRAM 吃緊時先 `docker compose stop encoder` 再跑測試。
 
