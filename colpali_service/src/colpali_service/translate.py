@@ -15,7 +15,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-_CJK_RE = re.compile(r"[㐀-䶿一-鿿]")          # 原 encoder.py 之單一來源（Phase 3 移入）
+# CJK Ext-A（U+3400–4DBF）+ 基本區（U+4E00–9FFF）；不含 Ext-B+
+_CJK_RE = re.compile(r"[㐀-䶿一-鿿]")
 _CJK_RUN_RE = re.compile(r"([㐀-䶿一-鿿]+)")
 _ASCII_LETTER_RE = re.compile(r"[A-Za-z]")
 # glossary 替換後殘留的「所有格/連接」虛詞段：直接丟棄不送 MT。

@@ -62,9 +62,11 @@ def test_translate_zh_pipeline_t2s_then_glossary_then_segment():
 
 
 def test_punctuation_only_output_is_failure():
-    """全部段被丟棄/輸出只剩標點 → 不得宣稱翻譯成功。"""
+    """輸出只剩標點 → 不得宣稱翻譯成功：(a) 全段被丟棄；(b) MT 真的吐回標點。"""
     tr = _fake_translator(mt_fn=lambda texts: ["?"] * len(texts))
-    assert tr.translate("的？").translated_q is None
+    assert tr.translate("的？").translated_q is None      # (a) 虛詞丟棄後只剩標點，MT 未被呼叫
+    # (b) CJK 段送 MT、MT 回 "?" → ASCII 守門擋下
+    assert tr.translate("與肱二頭肌").translated_q is None
 
 
 def test_translate_mt_failure_returns_null_not_raise():
