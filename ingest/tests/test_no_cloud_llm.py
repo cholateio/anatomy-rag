@@ -69,20 +69,30 @@ def test_ingest_source_does_not_import_cloud_llm():
 @pytest.mark.asyncio
 async def test_run_orchestration_makes_no_outbound_cloud_connection(monkeypatch):
     """FIX D（Codex medium #4）：socket guard 下跑完整 cli._run（synthetic 來源 + mock runtime +
-    真 localhost DB/MinIO），確認編排層不觸發任何非 loopback 連線（疑似雲端 API）。
+    真 localhost DB + **fake S3**），確認編排層不觸發任何非 loopback 連線（疑似雲端 API）。
 
-    loopback（DB :6432 / MinIO :9000）放行；任何非 loopback 連線 → AssertionError。
+    S3 走 fake client（不開 socket）以保持 CI 可攜（db-integration job 無 MinIO 服務），
+    同時是更強的「無雲端連線」證明：編排期間**唯一**的網路活動就是 DB loopback。
+    loopback（DB :6432）放行；任何非 loopback 連線 → AssertionError。
     """
     import os
     from urllib.parse import urlparse
 
     import asyncpg
     from anatomy_ingest.cli import _run, build_parser
+    from anatomy_ingest.config import IngestConfig
 
     monkeypatch.setenv("S3_ENDPOINT", os.environ.get("S3_ENDPOINT", "http://localhost:9000"))
     monkeypatch.setenv("S3_BUCKET", os.environ.get("S3_BUCKET", "anatomy-rag-pages"))
     monkeypatch.setenv("S3_ACCESS_KEY", os.environ.get("S3_ACCESS_KEY", "minioadmin"))
     monkeypatch.setenv("S3_SECRET_KEY", os.environ.get("S3_SECRET_KEY", "minioadmin"))
+
+    # fake S3：不開 socket → 編排期間唯一網路活動為 DB loopback（CI 無 MinIO 亦可跑）
+    class _FakeS3Client:
+        def put_object(self, **kw):
+            return {"ETag": "fake"}
+
+    monkeypatch.setattr(IngestConfig, "make_s3_client", lambda self: _FakeS3Client())
 
     # 解析 DATABASE_URL / S3_ENDPOINT 的 host，擴充 guard allowlist（通常已含 localhost/127.0.0.1）
     _extra_allowed: set[str] = set()
