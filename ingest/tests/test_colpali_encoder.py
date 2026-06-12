@@ -37,6 +37,11 @@ def test_encode_page_excludes_invalid_mask_from_pool_and_bins():
     enc = encode_page_image(FakeRuntime(), "x")
     assert enc.n_patches == 8  # 2 個 invalid 被排除
     assert enc.embed_model == "fake"
+    # POOLED 路徑也必須排除 invalid 列——只平均前 8 列
+    expected_pooled = FakeVecs.embeddings[:8].mean(axis=0)
+    np.testing.assert_array_equal(enc.pooled_f32, expected_pooled)
+    # 若回歸把 mask 從 pooling 拿掉（平均含 padding 列），下面這行會抓到
+    assert not np.allclose(enc.pooled_f32, FakeVecs.embeddings.mean(axis=0))
 
 
 def test_encode_page_deterministic():
