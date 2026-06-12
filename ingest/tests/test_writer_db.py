@@ -170,3 +170,44 @@ async def test_record_error_clamps_invalid_page_num_to_null(conn):
         book_id,
     )
     assert err["page_num"] is None and err["stage"] == "write"
+
+
+async def test_page_identity_mismatch_is_per_page_failure(conn):
+    """rec 與 enc 的 page_num 不符 → 該頁不寫入、記 ingest_errors，不汙染檢索（Codex high #1）。"""
+    book_id = await _new_book(conn)
+    mismatched = (_page_record(1), _enc(2))  # rec=page1 但 enc=page2 → 配對錯誤
+    outcome = await write_batch(conn, book_id, KB, [mismatched, (_page_record(3), _enc(3))])
+    assert outcome.written == [3] and outcome.failed == [1]
+    n1 = await conn.fetchval(
+        "SELECT count(*) FROM pages WHERE kb_version=$1 AND book_id=$2 AND page_num=1", KB, book_id)
+    assert n1 == 0  # 身分不符的頁未寫入
+    err = await conn.fetchrow(
+        "SELECT page_num, stage FROM ingest_errors"
+        " WHERE kb_version=$1 AND book_id=$2 AND page_num=1",
+        KB, book_id)
+    assert err is not None and err["stage"] == "write"
+
+
+async def test_malformed_record_does_not_lose_batch(conn):
+    """缺 page_num 的畸形 record（KeyError 在 savepoint 內）不致整批 rollback（Codex high #2）。"""
+    book_id = await _new_book(conn)
+    # 缺 page_num 的畸形 record
+    malformed = ({"page_image_uri": "s3://x", "docling_md": "x", "metadata": {}}, _enc(1))
+    outcome = await write_batch(
+        conn, book_id, KB, [(_page_record(1), _enc(1)), malformed, (_page_record(3), _enc(3))])
+    assert sorted(p for p in outcome.written) == [1, 3]
+    assert None in outcome.failed  # 畸形 record 記為 None（book 層）
+    rows = await conn.fetch(
+        "SELECT page_num FROM pages WHERE kb_version=$1 AND book_id=$2", KB, book_id)
+    assert {r["page_num"] for r in rows} == {1, 3}  # 好頁仍提交
+
+
+async def test_sample_verify_detects_missing_expected(conn):
+    """expected_page_nums 提供時，pages 缺的預期頁列入 mismatches（Codex medium #3）。"""
+    book_id = await _new_book(conn)
+    await write_batch(conn, book_id, KB, [(_page_record(1), _enc(1)), (_page_record(2), _enc(2))])
+    # 預期 1、2、3 都在，但只寫了 1、2 → page 3 應被標 missing
+    report = await sample_verify(conn, book_id, KB, fraction=1.0, rng_seed=0,
+                                 expected_page_nums={1, 2, 3})
+    missing = [m for m in report["mismatches"] if m["reason"] == "expected page missing from pages"]
+    assert missing == [{"page_num": 3, "reason": "expected page missing from pages"}]

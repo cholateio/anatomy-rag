@@ -146,10 +146,20 @@ async def write_batch(
     await tx.start()
     try:
         for idx, (rec, enc) in enumerate(batch):
-            page_num = rec["page_num"]
             sp = f"sp_{idx}"
             await conn.execute(f"SAVEPOINT {sp}")
+            # rec 畸形時保持 None → 記為 book 層錯誤、不致整批 rollback（Codex high #2）
+            page_num = None
             try:
+                # 移進 savepoint 內：畸形 record 的 KeyError 也走逐頁隔離
+                page_num = rec["page_num"]
+                if enc.page_num != page_num:
+                    # 頁面身分守門（Codex high #1）：rec 與 enc 配對錯誤會把 A 頁 metadata
+                    # 綁到 B 頁向量，通過所有約束與 sample_verify 卻汙染檢索——視為失敗，不寫入。
+                    raise ValueError(
+                        f"page 識別不符：rec.page_num={page_num} "
+                        f"但 enc.page_num={enc.page_num}（疑似配對錯誤）"
+                    )
                 enc.validate()
                 await _insert_page(conn, book_id, kb_version, rec, enc)
                 await conn.execute(f"RELEASE SAVEPOINT {sp}")
@@ -185,8 +195,14 @@ async def sample_verify(
     kb_version: int,
     fraction: float = 0.05,
     rng_seed: int | None = None,
+    expected_page_nums: set[int] | None = None,
 ) -> dict[str, Any]:
-    """§2.7 SHOULD：隨機抽 fraction 比例頁面，比對 pages 存在 + page_patches 計數 > 0。"""
+    """§2.7 SHOULD：隨機抽 fraction 比例頁面，比對 pages 存在 + page_patches 計數 > 0。
+
+    expected_page_nums（選填，Codex medium #3）：呼叫端「預期應在庫」的 page_num 集合
+    （cli 傳 todo 中未在上游階段失敗的頁）。提供時，**凡 expected 但 pages 缺的頁一律列入
+    mismatches**（不受抽樣比例影響）——否則抽樣母體只取既存列，偵測不到「該在卻不在」的遺漏。
+    """
     rows = await conn.fetch(
         "SELECT p.page_id, p.page_num, count(pp.patch_idx) AS n"
         " FROM pages p LEFT JOIN page_patches pp"
@@ -196,12 +212,16 @@ async def sample_verify(
         book_id,
         kb_version,
     )
+    mismatches = []
+    if expected_page_nums is not None:
+        present = {r["page_num"] for r in rows}
+        for pn in sorted(set(expected_page_nums) - present):
+            mismatches.append({"page_num": pn, "reason": "expected page missing from pages"})
     if not rows:
-        return {"sampled": 0, "mismatches": []}
+        return {"sampled": 0, "mismatches": mismatches}
     rng = np.random.default_rng(rng_seed)
     k = max(1, round(len(rows) * fraction))
     idxs = rng.choice(len(rows), size=min(k, len(rows)), replace=False)
-    mismatches = []
     for i in idxs:
         r = rows[int(i)]
         if r["n"] == 0:
