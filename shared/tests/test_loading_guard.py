@@ -23,6 +23,17 @@ def test_substring_lookalike_is_not_allowlisted():
         check_loading_info({"missing_keys": ["vlm.lm_head.weight.lora_A"]})
 
 
+def test_bare_lm_head_key_is_expected():
+    check_loading_info({"missing_keys": ["lm_head.weight"]})
+
+
+def test_mixed_allowlisted_and_real_missing_still_raises():
+    """allowlist 只豁免列名 key，混入真缺漏仍須 fail。"""
+    with pytest.raises(RuntimeError, match="q_proj"):
+        check_loading_info({"missing_keys": ["vlm.lm_head.weight",
+                                             "vlm.model.layers.0.self_attn.q_proj.weight"]})
+
+
 def test_unexpected_mismatched_error_msgs_raise():
     with pytest.raises(RuntimeError):
         check_loading_info({"unexpected_keys": ["foo"]})

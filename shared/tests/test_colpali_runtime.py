@@ -65,6 +65,14 @@ def test_get_runtime_real_raises_runtime_error_without_torch():
         get_runtime(mock=False)
 
 
+def test_mock_encode_pages_matches_encode_page():
+    rt = MockColPaliRuntime()
+    pages = rt.encode_pages(["p1", "p2"])
+    assert len(pages) == 2
+    single = rt.encode_page("p1")
+    assert np.array_equal(pages[0].embeddings, single.embeddings)
+
+
 def test_encoded_vectors_eq_is_identity_not_value():
     """eq=False：== 走 identity（不會對 ndarray 做 ambiguous 真值判斷而爆炸）。"""
     rt = MockColPaliRuntime()

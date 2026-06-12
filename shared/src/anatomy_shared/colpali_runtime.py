@@ -84,6 +84,10 @@ class MockColPaliRuntime:
         emb = _seeded_vectors(key, self.n_page_patches)
         return EncodedVectors(embeddings=emb, valid_mask=np.ones(self.n_page_patches, dtype=bool))
 
+    def encode_pages(self, images, batch_size: int = 4) -> list:
+        """批次頁面編碼（與 RealColPaliRuntime 同介面；mock 逐張委派）。"""
+        return [self.encode_page(img) for img in images]
+
 
 def get_runtime(mock: bool = True, **kwargs):
     """mock=True → MockColPaliRuntime；mock=False → 真實 runtime（lazy import torch，D-L）。
@@ -94,7 +98,7 @@ def get_runtime(mock: bool = True, **kwargs):
         return MockColPaliRuntime()
     try:
         from anatomy_shared.colpali_real import RealColPaliRuntime
-    except ModuleNotFoundError as e:
+    except ImportError as e:
         raise RuntimeError(
             "真實 ColPali runtime 需要 gpu 依賴：請以 colpali extra 安裝 "
             "（uv sync --package colpali-service --extra gpu）或使用 make up-gpu。"
