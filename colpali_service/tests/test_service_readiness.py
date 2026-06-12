@@ -68,14 +68,13 @@ async def test_load_failure_stays_503_with_error(monkeypatch):
 async def test_stale_loader_cannot_pollute_new_lifespan(monkeypatch):
     """舊 lifespan 的慢載入完成後，不得覆寫新 lifespan 的狀態。
 
-    以 Event 顯式同步（非排程順序/sleep）：started 保證舊 loader 已起跑並 park，
-    stale_done 保證舊執行緒的寫入已落地後才做最終斷言。
+    以 Event 顯式同步（非排程順序/sleep）：started 保證舊 loader 已起跑並 park；
+    最終斷言前輪詢舊 dict，確保舊執行緒的 stale 寫入已落地。
     """
     import colpali_service.main as m
 
     gate = threading.Event()
     started = threading.Event()
-    stale_done = threading.Event()  # noqa: F841  # 概念標記；實作以輪詢 old_state 替代
     first = threading.Event()   # 第一個取得者=舊 lifespan 的 loader（test-and-set，無排程假設）
 
     class Enc:
