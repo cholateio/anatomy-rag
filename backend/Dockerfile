@@ -10,6 +10,9 @@ COPY pyproject.toml uv.lock ./
 COPY shared ./shared
 COPY backend ./backend
 COPY colpali_service ./colpali_service
+# 注意：ingest 原始碼隨 workspace 一起 COPY（uv sync 需所有成員 manifest），
+# 但 backend 映像**不安裝** anatomy-ingest（torch/docling/poppler 重依賴）。
+# 離線建庫 MUST 在 GPU host venv 執行（make ingest-gate）或專用 ingest 容器，非此 backend 容器。
 COPY ingest ./ingest
 COPY eval ./eval
 # backend 依賴輕量 anatomy-shared（純 numpy、無 torch）→ 映像精簡

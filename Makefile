@@ -1,4 +1,4 @@
-.PHONY: help up up-gpu up-obs down logs migrate gpu-smoke golden-bytes ingest-sample bench-stageb test lint fmt encoder-models encoder-gate
+.PHONY: help up up-gpu up-obs down logs migrate gpu-smoke golden-bytes ingest-sample ingest-gate bench-stageb test lint fmt encoder-models encoder-gate
 
 help:
 	@echo "make up / up-gpu / up-obs / down / logs"
@@ -39,9 +39,18 @@ gpu-smoke:
 golden-bytes:
 	cd frontend && node scripts/dump-golden-stream.mjs
 
-# 佔位（Phase 2+ ingest CLI 與樣本資料就緒後生效；需 ingest 映像或於 GPU 主機執行）。
+# mock smoke：synthetic 來源 + mock runtime，寫入真 DB/MinIO（需 make up + make migrate）。
+# 連 localhost:6432/9000（compose 對外埠）；不需 GPU/poppler。
 ingest-sample:
-	docker compose run --rm backend sh -c "uv run python -m anatomy_ingest.cli --pdf /data/sample.pdf --book-meta /data/sample.yaml --kb-version 1 --batch-size 4"
+	DATABASE_URL=postgresql://anatomy:anatomy_dev_pw@localhost:6432/anatomy_rag \
+	S3_ENDPOINT=http://localhost:9000 S3_BUCKET=anatomy-rag-pages \
+	S3_ACCESS_KEY=minioadmin S3_SECRET_KEY=minioadmin \
+	uv run --no-sync python -m anatomy_ingest.cli \
+	  --synthetic 6 --book-meta ingest/scripts/sample_book.yaml --kb-version 1 --batch-size 2
+
+# GPU gate：真 1 頁 PDF + real ColPali + 真 MinIO/PG（手動，非 CI；需 poppler + GPU venv）。
+ingest-gate:
+	uv run --no-sync python ingest/scripts/ingest_gate.py
 
 # Stage B MaxSim 延遲探針（手動；需 compose 起 DB + 已 migrate；DL-013，非 CI gate）
 bench-stageb:
