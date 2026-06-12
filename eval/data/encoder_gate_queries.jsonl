@@ -1,0 +1,24 @@
+{"id": "gate-zh-001", "category": "text_only", "query": "肱二頭肌的起止點是什麼？", "expected_pages": ["gate:biceps"]}
+{"id": "gate-zh-002", "category": "text_only", "query": "正中神經在前臂支配哪些肌肉？", "expected_pages": ["gate:median-nerve"]}
+{"id": "gate-zh-003", "category": "text_only", "query": "股骨頭的血液供應來自哪些動脈？", "expected_pages": ["gate:femoral-head"]}
+{"id": "gate-zh-004", "category": "text_only", "query": "臂神經叢的根、幹、股、束如何排列？", "expected_pages": ["gate:brachial-plexus"]}
+{"id": "gate-zh-005", "category": "text_only", "query": "上縱隔內有哪些重要構造？", "expected_pages": ["gate:mediastinum-sup"]}
+{"id": "gate-zh-006", "category": "text_only", "query": "膝關節由哪些主要韌帶維持穩定？", "expected_pages": ["gate:knee-ligaments"]}
+{"id": "gate-zh-007", "category": "text_only", "query": "心臟的四個瓣膜分別位在哪裡？", "expected_pages": ["gate:heart-valves"]}
+{"id": "gate-zh-008", "category": "text_only", "query": "肝在解剖上分為哪幾葉？", "expected_pages": ["gate:liver"]}
+{"id": "gate-zh-009", "category": "text_only", "query": "腎元是什麼？它如何過濾血液？", "expected_pages": ["gate:nephron"]}
+{"id": "gate-zh-010", "category": "text_only", "query": "顱底有哪些孔洞讓腦神經通過？", "expected_pages": ["gate:skull-foramina"]}
+{"id": "gate-zh-011", "category": "text_only", "query": "biceps brachii 的神經支配是什麼？", "expected_pages": ["gate:biceps"]}
+{"id": "gate-zh-012", "category": "text_only", "query": "inguinal canal 的邊界與內容物有哪些？", "expected_pages": ["gate:inguinal-canal"]}
+{"id": "gate-en-001", "category": "text_only", "query": "What are the origin and insertion of the biceps brachii?", "expected_pages": ["gate:biceps"]}
+{"id": "gate-en-002", "category": "text_only", "query": "Which forearm muscles are innervated by the median nerve?", "expected_pages": ["gate:median-nerve"]}
+{"id": "gate-en-003", "category": "text_only", "query": "Which arteries supply blood to the femoral head?", "expected_pages": ["gate:femoral-head"]}
+{"id": "gate-en-004", "category": "text_only", "query": "Describe the roots, trunks, divisions and cords of the brachial plexus.", "expected_pages": ["gate:brachial-plexus"]}
+{"id": "gate-en-005", "category": "text_only", "query": "What structures lie within the superior mediastinum?", "expected_pages": ["gate:mediastinum-sup"]}
+{"id": "gate-en-006", "category": "text_only", "query": "Where are the four valves of the heart located?", "expected_pages": ["gate:heart-valves"]}
+{"id": "gate-en-007", "category": "text_only", "query": "How is the liver divided into lobes?", "expected_pages": ["gate:liver"]}
+{"id": "gate-en-008", "category": "text_only", "query": "What is the functional filtration unit of the kidney?", "expected_pages": ["gate:nephron"]}
+{"id": "gate-en-009", "category": "text_only", "query": "How does the bronchial tree branch within the lungs?", "expected_pages": ["gate:bronchi"]}
+{"id": "gate-en-010", "category": "text_only", "query": "Which skull base foramina transmit the cranial nerves?", "expected_pages": ["gate:skull-foramina"]}
+{"id": "gate-en-011", "category": "text_only", "query": "Which ligaments stabilize the knee joint?", "expected_pages": ["gate:knee-ligaments"]}
+{"id": "gate-en-012", "category": "text_only", "query": "What are the boundaries and contents of the inguinal canal?", "expected_pages": ["gate:inguinal-canal"]}
