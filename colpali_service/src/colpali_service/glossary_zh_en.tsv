@@ -1,0 +1,42 @@
+# 解剖術語 glossary（DL-020 SHOULD）：term	translation；長詞優先於載入時排序
+# key 為繁體；LocalTranslator 載入時以 OpenCC t2s 轉簡比對
+肱二頭肌	biceps brachii
+肱三頭肌	triceps brachii
+三角肌	deltoid
+胸大肌	pectoralis major
+斜方肌	trapezius
+背闊肌	latissimus dorsi
+縫匠肌	sartorius
+股四頭肌	quadriceps femoris
+腓腸肌	gastrocnemius
+橫膈膜	diaphragm
+正中神經	median nerve
+尺神經	ulnar nerve
+橈神經	radial nerve
+坐骨神經	sciatic nerve
+股神經	femoral nerve
+迷走神經	vagus nerve
+臂神經叢	brachial plexus
+腰神經叢	lumbar plexus
+神經支配	innervation
+頸動脈	carotid artery
+主動脈弓	aortic arch
+鎖骨下動脈	subclavian artery
+股動脈	femoral artery
+旋股內側動脈	medial circumflex femoral artery
+血液供應	blood supply
+肩胛骨	scapula
+鎖骨	clavicle
+肱骨	humerus
+橈骨	radius
+尺骨	ulna
+股骨頭	femoral head
+股骨	femur
+脛骨	tibia
+腓骨	fibula
+喙突	coracoid process
+起止點	origin and insertion
+上縱隔	superior mediastinum
+縱隔	mediastinum
+腹股溝管	inguinal canal
+膝關節	knee joint
