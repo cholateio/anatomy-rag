@@ -1344,6 +1344,45 @@ async def test_record_error_clamps_invalid_page_num_to_null(conn):
         "SELECT page_num, stage FROM ingest_errors WHERE kb_version=$1 AND book_id=$2"
         " ORDER BY error_id DESC LIMIT 1", KB, book_id)
     assert err["page_num"] is None and err["stage"] == "write"
+
+
+async def test_page_identity_mismatch_is_per_page_failure(conn):
+    """rec 與 enc 的 page_num 不符 → 該頁不寫入、記 ingest_errors，不汙染檢索（Codex high #1）。"""
+    book_id = await _new_book(conn)
+    mismatched = (_page_record(1), _enc(2))  # rec=page1 但 enc=page2 → 配對錯誤
+    outcome = await write_batch(conn, book_id, KB, [mismatched, (_page_record(3), _enc(3))])
+    assert outcome.written == [3] and outcome.failed == [1]
+    n1 = await conn.fetchval(
+        "SELECT count(*) FROM pages WHERE kb_version=$1 AND book_id=$2 AND page_num=1", KB, book_id)
+    assert n1 == 0  # 身分不符的頁未寫入
+    err = await conn.fetchrow(
+        "SELECT page_num, stage FROM ingest_errors WHERE kb_version=$1 AND book_id=$2 AND page_num=1",
+        KB, book_id)
+    assert err is not None and err["stage"] == "write"
+
+
+async def test_malformed_record_does_not_lose_batch(conn):
+    """缺 page_num 的畸形 record（KeyError 在 savepoint 內）不致整批 rollback（Codex high #2）。"""
+    book_id = await _new_book(conn)
+    malformed = ({"page_image_uri": "s3://x", "docling_md": "x", "metadata": {}}, _enc(1))  # 缺 page_num
+    outcome = await write_batch(
+        conn, book_id, KB, [(_page_record(1), _enc(1)), malformed, (_page_record(3), _enc(3))])
+    assert sorted(p for p in outcome.written) == [1, 3]
+    assert None in outcome.failed  # 畸形 record 記為 None（book 層）
+    rows = await conn.fetch(
+        "SELECT page_num FROM pages WHERE kb_version=$1 AND book_id=$2", KB, book_id)
+    assert {r["page_num"] for r in rows} == {1, 3}  # 好頁仍提交
+
+
+async def test_sample_verify_detects_missing_expected(conn):
+    """expected_page_nums 提供時，pages 缺的預期頁列入 mismatches（Codex medium #3）。"""
+    book_id = await _new_book(conn)
+    await write_batch(conn, book_id, KB, [(_page_record(1), _enc(1)), (_page_record(2), _enc(2))])
+    # 預期 1、2、3 都在，但只寫了 1、2 → page 3 應被標 missing
+    report = await sample_verify(conn, book_id, KB, fraction=1.0, rng_seed=0,
+                                 expected_page_nums={1, 2, 3})
+    missing = [m for m in report["mismatches"] if m["reason"] == "expected page missing from pages"]
+    assert missing == [{"page_num": 3, "reason": "expected page missing from pages"}]
 ```
 
 - [ ] **Step 3: 跑測試確認失敗**
@@ -1465,10 +1504,16 @@ async def write_batch(conn, book_id, kb_version: int,
     await tx.start()
     try:
         for idx, (rec, enc) in enumerate(batch):
-            page_num = rec["page_num"]
             sp = f"sp_{idx}"
             await conn.execute(f"SAVEPOINT {sp}")
+            page_num = None  # rec 畸形時保持 None → 記為 book 層錯誤、不致整批 rollback（Codex high #2）
             try:
+                page_num = rec["page_num"]  # 移進 savepoint 內：畸形 record 的 KeyError 也走逐頁隔離
+                if enc.page_num != page_num:
+                    # 頁面身分守門（Codex high #1）：rec 與 enc 配對錯誤會把 A 頁 metadata 綁到 B 頁向量，
+                    # 通過所有約束與 sample_verify 卻汙染檢索——當作該頁寫入失敗，不寫入。
+                    raise ValueError(
+                        f"page 識別不符：rec.page_num={page_num} 但 enc.page_num={enc.page_num}（疑似配對錯誤）")
                 enc.validate()
                 await _insert_page(conn, book_id, kb_version, rec, enc)
                 await conn.execute(f"RELEASE SAVEPOINT {sp}")
@@ -1495,8 +1540,14 @@ async def write_batch(conn, book_id, kb_version: int,
 
 
 async def sample_verify(conn, book_id, kb_version: int, fraction: float = 0.05,
-                        rng_seed: int | None = None) -> dict[str, Any]:
-    """§2.7 SHOULD：隨機抽 fraction 比例頁面，比對 pages 存在 + page_patches 計數 > 0。"""
+                        rng_seed: int | None = None,
+                        expected_page_nums: set[int] | None = None) -> dict[str, Any]:
+    """§2.7 SHOULD：隨機抽 fraction 比例頁面，比對 pages 存在 + page_patches 計數 > 0。
+
+    expected_page_nums（選填，Codex medium #3）：呼叫端「預期應在庫」的 page_num 集合
+    （cli 傳 todo 中未在上游階段失敗的頁）。提供時，**凡 expected 但 pages 缺的頁一律列入
+    mismatches**（不受抽樣比例影響）——否則抽樣母體只取既存列，偵測不到「該在卻不在」的遺漏。
+    """
     rows = await conn.fetch(
         "SELECT p.page_id, p.page_num, count(pp.patch_idx) AS n"
         " FROM pages p LEFT JOIN page_patches pp"
@@ -1505,12 +1556,16 @@ async def sample_verify(conn, book_id, kb_version: int, fraction: float = 0.05,
         " GROUP BY p.page_id, p.page_num ORDER BY p.page_num",
         book_id, kb_version,
     )
+    mismatches = []
+    if expected_page_nums is not None:
+        present = {r["page_num"] for r in rows}
+        for pn in sorted(set(expected_page_nums) - present):
+            mismatches.append({"page_num": pn, "reason": "expected page missing from pages"})
     if not rows:
-        return {"sampled": 0, "mismatches": []}
+        return {"sampled": 0, "mismatches": mismatches}
     rng = np.random.default_rng(rng_seed)
     k = max(1, round(len(rows) * fraction))
     idxs = rng.choice(len(rows), size=min(k, len(rows)), replace=False)
-    mismatches = []
     for i in idxs:
         r = rows[int(i)]
         if r["n"] == 0:
@@ -1528,7 +1583,7 @@ PG_DIRECT_URL=postgresql://anatomy:anatomy_dev_pw@localhost:5432/anatomy_rag \
 ANATOMY_DB_TESTS_ALLOW_DESTRUCTIVE=1 \
 uv run --no-sync pytest ingest/tests/test_writer_db.py -q
 ```
-Expected: PASS（7 passed）
+Expected: PASS（9 passed）
 
 > `test_savepoint_isolates_failed_page` 的最終斷言放寬為「集合 == {1,2,3}」即可（IN 不保序，排序斷言用集合）。若 asyncpg savepoint 名稱衝突，確認每頁用唯一 `sp_{idx}`。
 
@@ -1821,7 +1876,10 @@ async def _run(ns: argparse.Namespace) -> int:
             total_failed += outcome.failed
             print(f"[batch] 寫入 {outcome.written}，失敗 寫={outcome.failed} 上游={up_failed}")
 
-        report = await sample_verify(conn, book_id, ns.kb_version, fraction=0.05)
+        # expected = 本次嘗試（todo）中未在上游階段失敗的頁；sample_verify 據此偵測「該在卻不在」
+        expected = {sp.parse.page_num for sp in todo} - set(total_failed)
+        report = await sample_verify(conn, book_id, ns.kb_version, fraction=0.05,
+                                     expected_page_nums=expected)
         print(f"[done] 共寫入 {len(total_written)} 頁、失敗 {len(total_failed)} 頁；抽樣校驗 {report}")
         return 1 if (total_failed or report["mismatches"]) else 0
     finally:
@@ -2138,7 +2196,7 @@ PG_DIRECT_URL=postgresql://anatomy:anatomy_dev_pw@localhost:5432/anatomy_rag \
 ANATOMY_DB_TESTS_ALLOW_DESTRUCTIVE=1 \
 uv run --no-sync pytest ingest/tests -q -m db
 ```
-Expected: PASS（writer 7 測試）
+Expected: PASS（writer 9 測試）
 
 - [ ] **Step 3: lint + 既有套件未破壞**
 
@@ -2192,6 +2250,16 @@ Expected: `[gate] PASS`（pages=1、patches>0、embed_model=vidore/colpali-v1.3-
 | 6 | medium | 單頁 GPU gate 抓不到頁碼漂移、未真讀 MinIO | 3 頁可區辨 fixture + 頁碼精確對應斷言 + 逐頁 GET MinIO 驗 PNG（Task 13） |
 | 7 | high | cli `--help` 急切 import 重依賴 → 部分佈建環境失敗 | 頂層只輕量 import、重依賴 lazy 進 `_run` + 子行程 `--help` 退 0 測試（Task 11） |
 | 8 | medium | 數值參數未驗證（batch=0 崩、負數靜默空跑） | `_positive_int` argparse type + 參數化「退碼 2」測試（Task 11） |
+
+**第二輪（2026-06-13，writer 實作後的跨模型 phase review，commit 6bbbf26）**：Codex 確認核心交易設計健全
+（asyncpg `conn.transaction()` + 手動 SAVEPOINT 不 desync；`::text::bit(128)`/`::halfvec` 綁定、executemany、
+f-string 名稱在 transaction pooling + `statement_cache_size=0` 下皆相容；無注入）。另抓 3 項計畫未涵蓋缺口，全採納併入 Task 10/11：
+
+| # | 嚴重度 | 問題 | 處置 |
+|---|---|---|---|
+| 9 | high | `write_batch` 不驗 `rec.page_num == enc.page_num` → 配對錯誤把 A 頁 metadata 綁 B 頁向量，通過所有約束與 sample_verify 卻汙染檢索 | 插入前身分守門，不符＝該頁寫入失敗 + `test_page_identity_mismatch_is_per_page_failure`（Task 10） |
+| 10 | high | `rec["page_num"]` 在 savepoint 之前讀取，畸形 record 的 KeyError 逃到外層整批 rollback | page_num 讀取/驗證移進 savepoint 內、page_num 預設 None + `test_malformed_record_does_not_lose_batch`（Task 10） |
+| 11 | medium | `sample_verify` 母體只取既存列 → 偵測不到「該在卻不在」的遺漏頁 | 加 `expected_page_nums` 參數、cli 傳 todo−failed + `test_sample_verify_detects_missing_expected`（Task 10/11） |
 
 ## 風險與待後續處理（非阻斷）
 
