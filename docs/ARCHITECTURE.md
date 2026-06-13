@@ -941,10 +941,11 @@ OpenAI 標準付費 API 有 RPM/TPM 限額，課堂同步使用會撞限額。
   → 否則正常執行，完成後寫入 (v_q, query, answer, sources, kb_version)
 ```
 
-骨架：`SemanticCache(redis, embed_fn, threshold=0.95, ttl=86400*14)`，`get(query, kb_version)` / `set(query, answer, sources, kb_version)`。
+骨架（**DL-025 定案**）：v1＝`SemanticCache(redis, *, ttl_seconds, key_prefix=None)`，**exact-normalized-query**（零 embedding）；`get(query, kb_version, metadata_filter=None)` / `set(query, answer, sources, kb_version, *, verified, metadata_filter=None)`；cache key 納入 `kb_version` + canonical `metadata_filter`。語意向量比對（`embed_fn` / `distance_threshold≈0.05`）為**後續 config 開關**（`cache_mode="semantic"`，fastembed torch-free）。
 
 **規則**：
-- **MUST**：cache key namespace 含 `kb_version`，版本切換時不混用；knowledge base 版本變更時清空所有舊版快取
+- **MUST（DL-025）**：v1 預設 exact-normalized-query；cache key＝`normalize(query)` + `kb_version` + canonical `metadata_filter` 的 SHA-256（`metadata_filter` 會改變檢索結果，**MUST** 納入 key，否則跨 filter 誤命中）；只快取通過引文驗證的答案（`set(verified=False)` 拒寫）
+- **MUST**：cache key namespace 含 `kb_version`，版本切換時不混用；knowledge base 版本變更時清空所有舊版快取（見 [§6.6](#66-知識庫版本管理)，用 `clear_kb_version()` 而非 `FLUSHDB`）
 - **MUST**：cache TTL 7–30 天
 - **MUST**：cache hit 時仍寫入 query_logs（標記 cache_hit=true）
 - **SHOULD**：使用 `redisvl`（Redis 官方 vector library）
@@ -976,7 +977,8 @@ OpenAI 標準付費 API 有 RPM/TPM 限額，課堂同步使用會撞限額。
 - **MUST**：版本切換後立即清空語意快取
 - **SHOULD（DL-011）**：雙版本並存窗縮為「canary + 短回滾期（數天）」，或舊版降 cold（不佔常駐 RAM）；非固定 4 週常駐（#書成長時雙版本＝patch 儲存與 RAM ×2）
 
-切換流程：`ingest.cli --kb-version 4` → `eval.ragas --kb-version 4` → 改 `ACTIVE_KB_VERSION=4` → `redis FLUSHDB` → 觀察 1 週 → `DELETE FROM pages WHERE kb_version = 3`。
+切換流程：`ingest.cli --kb-version 4` → `eval.ragas --kb-version 4` → 改 `ACTIVE_KB_VERSION=4` → 清空舊版語意快取（**`SemanticCache.clear_kb_version(3)`**，namespace SCAN+UNLINK；**不用 `FLUSHDB`** 以免誤清同 Redis 的限流桶，DL-025） → 觀察 1 週 → `DELETE FROM pages WHERE kb_version = 3`。
+> 註（DL-025）：版本隔離的**正確性**來自 key namespace 含 `kb_version` + 線上只讀 `ACTIVE_KB_VERSION`——切版後舊 namespace 不再被查、靠 TTL 消亡，`clear_kb_version` 為記憶體回收（非原子但不致錯答）。v1 無自動 version-switch endpoint，此步為 ops/runbook 手動執行。
 
 ## 6.7 醫學教育免責 UX
 

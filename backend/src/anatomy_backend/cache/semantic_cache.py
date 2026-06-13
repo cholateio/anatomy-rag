@@ -36,6 +36,10 @@ class SemanticCache:
     def __init__(self, redis, *, ttl_seconds: int, key_prefix: str | None = None) -> None:
         self._redis = redis
         self._ttl = int(ttl_seconds)
+        # fail-loud：非正 TTL 會讓 redis SET ex= 每次拋→被 fail-open 吞成 100% 靜默 miss。
+        # 寧可啟動即炸（§6.4 TTL 7–30 天），不要無聲停用快取。
+        if self._ttl <= 0:
+            raise ValueError(f"ttl_seconds 必須 > 0（§6.4 TTL 7–30 天），收到 {ttl_seconds!r}")
         self._prefix = key_prefix or self._DEFAULT_PREFIX
 
     @staticmethod
@@ -145,6 +149,9 @@ class SemanticCache:
         以 namespace pattern SCAN + UNLINK，只清該版本——不用 FLUSHDB（避免誤清同
         Redis 的限流桶）。非原子；但版本隔離正確性來自 namespace+active-only 讀取，
         殘留 key 不致錯答（見本 task 設計論證）。fail-open。
+
+        注意：非 CacheProtocol 介面方法（NoOpCache 無此方法）；切版 ops 對具體
+        SemanticCache 實例呼叫（§6.6 runbook，v1 無自動 endpoint）。
         """
         pattern = f"{self._prefix}:kb{kb_version}:*"
         try:

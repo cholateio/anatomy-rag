@@ -16,8 +16,5 @@ async def test_noop_set_is_safe_noop():
 
 
 def test_build_cache_returns_noop_in_v1():
+    # 舊 no-arg 形狀（無 redis_client）仍回 NoOp 退路
     assert isinstance(build_cache(SimpleNamespace()), NoOpCache)
-
-
-def test_build_cache_noop_without_redis_arg():
-    assert isinstance(build_cache(SimpleNamespace()), NoOpCache)  # 舊 no-arg 形狀仍回 NoOp

@@ -1,5 +1,7 @@
-"""語意快取 seam（§6.4）。v1 Phase 8 只定義介面 + NoOpCache（永遠 miss）；
-真 SemanticCache（redisvl + 本地 embedding、只快取已驗證答案）為 Phase 7。
+"""語意快取 seam（§6.4）。介面 CacheProtocol + NoOpCache（退路，永遠 miss）+ build_cache 工廠。
+Phase 7 v1 的真實作＝exact-normalized-query（semantic_cache.SemanticCache；零 embedding/redisvl）；
+語意向量比對為後續 config 開關（cache_mode="semantic"，fastembed torch-free，DL-025）。
+只快取已驗證答案（信任邊界＝chat.py verify_citations, DL-012）。
 DL-021：追問不查/不寫快取——由 chat.py 控制，不在此。"""
 from __future__ import annotations
 
@@ -62,7 +64,9 @@ def build_cache(settings, redis_client=None) -> CacheProtocol:
     if mode == "exact":
         from anatomy_backend.cache.semantic_cache import SemanticCache
 
-        return SemanticCache(redis_client, ttl_seconds=settings.cache_ttl_seconds)
+        return SemanticCache(
+            redis_client, ttl_seconds=getattr(settings, "cache_ttl_seconds", 1209600)
+        )
     if mode == "semantic":
         raise NotImplementedError(
             "cache_mode='semantic' 向量比對尚未啟用（需 fastembed，torch-free；見 DL-025 / DL-012）"

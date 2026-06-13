@@ -192,9 +192,18 @@ async def test_get_kb_envelope_mismatch_miss():
 
 
 async def test_get_corrupt_value_is_miss_not_raise():
+    # 合法 UTF-8、非法 JSON → JSONDecodeError（⊂ ValueError）→ miss，不拋
     r = _FakeRedis()
     c = _cache(r)
-    r.store[c._key("q", 1)] = b"\\xff not-json"
+    r.store[c._key("q", 1)] = b'{"v": 1, not json'
+    assert await c.get("q", 1) is None
+
+
+async def test_get_invalid_utf8_value_is_miss():
+    # 真 0xff bytes（非法 UTF-8）→ UnicodeDecodeError（⊂ ValueError）→ miss，不拋
+    r = _FakeRedis()
+    c = _cache(r)
+    r.store[c._key("q", 1)] = b"\xff\xfe not utf8"
     assert await c.get("q", 1) is None
 
 
@@ -285,3 +294,11 @@ async def test_noop_accepts_metadata_filter():
     c = NoOpCache()
     assert await c.get("q", 1, {"a": 1}) is None
     await c.set("q", "a", [], 1, verified=True, metadata_filter={"a": 1})  # 不拋
+
+
+def test_constructor_rejects_nonpositive_ttl():
+    # L2：非正 TTL fail-loud（否則 redis ex= 每次拋→fail-open 吞成 100% 靜默 miss）
+    with pytest.raises(ValueError):
+        SemanticCache(_FakeRedis(), ttl_seconds=0)
+    with pytest.raises(ValueError):
+        SemanticCache(_FakeRedis(), ttl_seconds=-5)
