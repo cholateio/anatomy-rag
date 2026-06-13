@@ -103,6 +103,7 @@ async def test_selfbuilt_real_timeout_degrades_and_outer_txn_survives(pool, monk
                        tokens_bin=tuple(patches[page_ids[0]][:6]),
                        translated_q=None, lang="en")
         async with hnsw_search_txn(pool, ef_search=100) as conn:
+            await conn.execute("SET LOCAL statement_timeout = '37s'")
             er = await SelfBuiltEngine("sql").retrieve(
                 conn, qr, None, kb_version=KB, top_k=100, top_n=10, stage_b_timeout_ms=300)
             alive = await conn.fetchval("SELECT 1")  # 外層 txn 未連鎖 abort
@@ -111,15 +112,16 @@ async def test_selfbuilt_real_timeout_degrades_and_outer_txn_survives(pool, monk
         assert er.ranked == []
         assert set(er.coarse_ids) == set(page_ids)
         assert alive == 1
-        assert st == "0"  # degrade 路徑 rollback 已還原
+        assert st == "37s"  # degrade 路徑 savepoint rollback 還原非零基線
     finally:
         async with pool.acquire() as conn:
             await conn.execute(f"DROP TABLE IF EXISTS page_patches_v{KB}")
             await conn.execute("TRUNCATE books RESTART IDENTITY CASCADE")
 
 
-async def test_selfbuilt_success_resets_statement_timeout(pool):
-    """成功路徑：Stage B 的 statement_timeout 不得洩漏到外層 txn（HIGH-1 修正）。"""
+async def test_selfbuilt_success_preserves_outer_statement_timeout(pool):
+    """成功路徑必須『還原』外層 txn 既有的 statement_timeout（非歸零）——否則摧毀
+    role/db/呼叫端設定的逾時護欄（Codex 終審 HIGH）。"""
     rng = np.random.default_rng(42)
     page_ids = [uuid.uuid4() for _ in range(3)]
     patches = {pid: [rng.bytes(16) for _ in range(8)] for pid in page_ids}
@@ -132,11 +134,14 @@ async def test_selfbuilt_success_resets_statement_timeout(pool):
         qr = QueryRepr(pooled_f32=tuple(pooled), tokens_bin=tuple(query_tokens),
                        translated_q=None, lang="en")
         async with hnsw_search_txn(pool, ef_search=100) as conn:
+            await conn.execute("SET LOCAL statement_timeout = '37s'")  # 非零基線護欄
+            baseline = await conn.fetchval("SELECT current_setting('statement_timeout')")
             er = await SelfBuiltEngine("sql").retrieve(
                 conn, qr, None, kb_version=KB, top_k=100, top_n=10)
             st = await conn.fetchval("SELECT current_setting('statement_timeout')")
+        assert baseline == "37s"      # sanity：基線確實非零
         assert er.degraded is False
-        assert st == "0"  # 成功路徑後 Stage B timeout 已重設，未洩漏給 BM25/metadata
+        assert st == baseline         # 還原為非零基線，而非 0（修正前此處會是 '0'）
     finally:
         async with pool.acquire() as conn:
             await conn.execute(f"DROP TABLE IF EXISTS page_patches_v{KB}")
