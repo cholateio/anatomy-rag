@@ -1,11 +1,13 @@
 """模型 fallback（§5.3 / §6.1）——per-attempt 計數 + sticky 切換 + tenacity backoff+jitter。
 
-語意（修正 Codex 對抗式審查 F1/F2）：
+語意（修正 Codex 對抗式審查 F1/F2；Codex 終審 P1）：
 - consecutive_errors 計**每次合格 provider 錯誤嘗試**（非每次呼叫），連續達 threshold 即切。
   「連續 3 次 5xx/429」如實觸發（含單呼叫內 tenacity 重試所產生的多次錯誤）。
 - 切換為 **sticky**：using_fallback 一旦為真即跨呼叫保持，不因單一成功 token 立即回退主模型
   （避免班級突發下反覆重擊故障主模型）。主→備恢復（half-open 探測 + cooldown）**延後
   Phase 9** 觀測/健康層（DL-011/§6）；本層為刻意最小範圍（v1 計數器 + sticky），非靜默缺口。
+- 預設 max_attempts = switch_threshold + 1：讓觸發切換的那次呼叫本身能用備援模型重試一次、
+  直接在呼叫內恢復（而非讓 tenacity 在 3 次用盡後直接 reraise）。（Codex 終審 P1）
 - 併發：asyncio 單執行緒、整數遞增間無 await → 無 torn write，不需 Lock（YAGNI）。
 - APIConnectionError 僅 tenacity 重試、**不計入**切換（主備同 vendor/endpoint，切模型無益）。
 - 建立成功後串流中途斷：傳播、不重試（避免重複 token）、不計數。
@@ -44,7 +46,8 @@ FALLBACK_TRIGGER_EXC: tuple[type[Exception], ...] = (
 )
 
 DEFAULT_SWITCH_THRESHOLD = 3
-DEFAULT_MAX_ATTEMPTS = 3
+DEFAULT_MAX_ATTEMPTS = DEFAULT_SWITCH_THRESHOLD + 1  # 留一次嘗試給備援：達 threshold 切換後，
+                                                     # 同一呼叫內仍能用備援模型重試（Codex 終審 P1）
 
 _EMPTY = object()
 

@@ -163,6 +163,19 @@ async def test_empty_stream_returns_nothing():
     assert mfc.consecutive_errors == 0
 
 
+async def test_default_config_recovers_on_fallback_within_triggering_call():
+    # Codex 終審 P1：用 build_llm 的預設（switch_threshold=3, max_attempts=4），
+    # 主模型連 3 次失敗的「那一次呼叫」本身就應切到健康備援並成功，而非拋例外。
+    primary = MockLLMClient(error=_timeout(), fail_first=99)
+    fallback = MockLLMClient(tokens=["備援回答"])
+    mfc = ModelFallbackClient(primary, fallback, wait=wait_none())  # 其餘走預設
+    out = await _drain(mfc)
+    assert out == ["備援回答"]
+    assert primary.invocations == 3
+    assert fallback.invocations == 1
+    assert mfc.using_fallback is True
+
+
 async def test_forwards_image_detail_and_forbidden_identifiers():
     # Fix 2b：stream_complete 的 image_detail / forbidden_identifiers 透傳給底層 client
     primary = MockLLMClient(tokens=["x"])

@@ -61,6 +61,13 @@ def test_figure_intent_no_eligible_pages_sends_zero():
     assert decision.indices == ()
 
 
+def test_max_images_zero_sends_no_images():
+    # 明確要求 0 圖（成本/隱私）必須被尊重（Codex 終審 P2）
+    results = [_r("figure_heavy"), _r("mixed")]
+    decision = route_images(results, QueryIntent.FIGURE, max_images=0)
+    assert decision.indices == ()
+
+
 def test_missing_page_type_metadata_treated_as_non_figure():
     r = RetrievalResult(uuid4(), 1.0, "Gray", "42", 1, "s3://x", "…", metadata={})
     decision = route_images([r], QueryIntent.FIGURE)

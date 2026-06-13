@@ -42,6 +42,8 @@ def route_images(
     if intent == QueryIntent.PURE_TEXT:
         return ImageRoutingDecision(indices=())
     cap = min(max_images, DL009_MAX_IMAGES)
+    if cap <= 0:
+        return ImageRoutingDecision(indices=())
     indices: list[int] = []
     for i, r in enumerate(results):
         if r.metadata.get("page_type") in _IMAGE_PAGE_TYPES:
