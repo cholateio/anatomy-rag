@@ -8,6 +8,7 @@ dependencies = [
   "asyncpg>=0.30", "alembic>=1.13", "pydantic>=2.7", "pydantic-settings>=2.3",
   "redis>=5.0", "redisvl>=0.18",
   "openai>=1.40",
+  "numpy>=1.26",
   "tenacity>=8.3", "httpx>=0.27",
   # 語意快取的本地 embedding 依賴留待實作快取模組時再加（屆時 decisions.md 決定
   # sentence-transformers(torch) vs fastembed(ONNX，較輕)）；Phase 0 不引入以保持 backend torch-free。

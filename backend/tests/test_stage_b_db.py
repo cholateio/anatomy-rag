@@ -64,7 +64,7 @@ async def test_stage_b_matches_oracle(pool):
             res = await stage_b_maxsim(conn, cand, query, kb_version=KB, top_n=10)
         # 與 oracle 手算逐頁比對
         oracle = {pid: maxsim_hamming(query, patches) for pid, patches in pages.items()}
-        oracle_ranked = sorted(oracle, key=lambda p: -oracle[p])
+        oracle_ranked = sorted(oracle, key=lambda p: (-oracle[p], p))
         assert [pid for pid, _ in res] == oracle_ranked
         for pid, score in res:
             assert abs(score - oracle[pid]) < 1e-6
@@ -136,7 +136,53 @@ async def test_stage_b_edge_bits_via_real_storage(pool):
         oracle = {pid: maxsim_hamming(query, patches) for pid, patches in pages.items()}
         for pid, score in res:
             assert abs(score - oracle[pid]) < 1e-6, f"位序不一致 @ {pid}"
-        assert [p for p, _ in res] == sorted(oracle, key=lambda p: -oracle[p])
+        assert [p for p, _ in res] == sorted(oracle, key=lambda p: (-oracle[p], p))
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute(f"DROP TABLE IF EXISTS page_patches_v{KB}")
+            await conn.execute("TRUNCATE books RESTART IDENTITY CASCADE")
+
+
+async def test_stage_b_numpy_matches_sql_and_oracle(pool):
+    from anatomy_backend.retrieval.stage_b import stage_b_maxsim_numpy
+    rng = np.random.default_rng(11)
+    pages = {uuid.uuid4(): [rng.bytes(16) for _ in range(8)] for _ in range(5)}
+    query = [rng.bytes(16) for _ in range(6)]
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("TRUNCATE books RESTART IDENTITY CASCADE")
+            await conn.execute(f"DROP TABLE IF EXISTS page_patches_v{KB}")
+            await _seed_patches(conn, pages, KB)
+            cand = list(pages.keys())
+            sql_res = await stage_b_maxsim(conn, cand, query, kb_version=KB, top_n=10)
+            np_res = await stage_b_maxsim_numpy(conn, cand, query, kb_version=KB, top_n=10)
+        oracle = {pid: maxsim_hamming(query, patches) for pid, patches in pages.items()}
+        assert [p for p, _ in np_res] == [p for p, _ in sql_res]
+        for pid, score in np_res:
+            assert abs(score - oracle[pid]) < 1e-6
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute(f"DROP TABLE IF EXISTS page_patches_v{KB}")
+            await conn.execute("TRUNCATE books RESTART IDENTITY CASCADE")
+
+
+async def test_stage_b_numpy_edge_bits_via_real_storage(pool):
+    """numpy 路徑（BitString.bytes 讀取）對 to_pg_bits 真實入庫的邊界位元 + oracle 三方等價
+    （Codex review #4）。"""
+    from anatomy_backend.retrieval.stage_b import stage_b_maxsim_numpy
+    pages = {uuid.uuid4(): [B0, B127], uuid.uuid4(): [B127, B56], uuid.uuid4(): [B56, B0]}
+    query = [B0, B127]
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("TRUNCATE books RESTART IDENTITY CASCADE")
+            await conn.execute(f"DROP TABLE IF EXISTS page_patches_v{KB}")
+            await _seed_via_to_pg_bits(conn, pages, KB)
+            cand = list(pages.keys())
+            np_res = await stage_b_maxsim_numpy(conn, cand, query, kb_version=KB, top_n=10)
+        oracle = {pid: maxsim_hamming(query, patches) for pid, patches in pages.items()}
+        for pid, score in np_res:
+            assert abs(score - oracle[pid]) < 1e-6, f"BitString.bytes↔to_pg_bits 位序不一致 @ {pid}"
+        assert [p for p, _ in np_res] == sorted(oracle, key=lambda p: (-oracle[p], p))
     finally:
         async with pool.acquire() as conn:
             await conn.execute(f"DROP TABLE IF EXISTS page_patches_v{KB}")

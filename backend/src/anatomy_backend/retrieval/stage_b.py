@@ -15,7 +15,12 @@ from uuid import UUID
 
 import asyncpg
 
+import numpy as np
+
 from anatomy_shared.binary import to_pg_bits
+
+# 256-entry uint8 popcount 查表（一次建好）
+_POPCOUNT = np.array([bin(i).count("1") for i in range(256)], dtype=np.uint16)
 
 _STAGE_B_SQL = """
 WITH query_tokens AS (
@@ -34,7 +39,7 @@ token_max_per_page AS (
 SELECT page_id, SUM(sim) AS maxsim_score
 FROM token_max_per_page
 GROUP BY page_id
-ORDER BY maxsim_score DESC
+ORDER BY maxsim_score DESC, page_id ASC
 LIMIT $4
 """
 
@@ -51,3 +56,45 @@ async def stage_b_maxsim(
     q_bits = [to_pg_bits(t) for t in query_tokens_bin]
     rows = await conn.fetch(_STAGE_B_SQL, q_bits, candidate_page_ids, kb_version, top_n)
     return [(r["page_id"], float(r["maxsim_score"])) for r in rows]
+
+
+_FETCH_PATCHES_SQL = """
+SELECT page_id, patch_bin
+FROM page_patches
+WHERE page_id = ANY($1::uuid[]) AND kb_version = $2
+"""
+
+
+async def stage_b_maxsim_numpy(
+    conn: "asyncpg.Connection",
+    candidate_page_ids: list[UUID],
+    query_tokens_bin: Sequence[bytes],
+    kb_version: int,
+    top_n: int = 10,
+) -> list[tuple[UUID, float]]:
+    """撈候選頁 patch_bin → 應用層 numpy XOR+popcount MaxSim（§4.4 並發退路）。
+
+    K=100 約 100×1024×16B ≈ 1.6MB 傳輸；CPU 從 PG 後端（共享、易爭用）移到 app worker
+    （隨 worker 數擴展）。位序與 SQL 路徑一致（皆 16-byte big-endian bit(128)）。
+    """
+    if not candidate_page_ids:
+        return []
+    # query tokens → (T, 16) uint8
+    q = np.frombuffer(b"".join(query_tokens_bin), dtype=np.uint8).reshape(
+        len(query_tokens_bin), 16)
+    rows = await conn.fetch(_FETCH_PATCHES_SQL, candidate_page_ids, kb_version)
+    # 依 page 聚 patch（bs.bytes = 16 bytes；勿用 bytes(bs)）
+    by_page: dict[UUID, list[bytes]] = {}
+    for r in rows:
+        by_page.setdefault(r["page_id"], []).append(r["patch_bin"].bytes)
+    scores: list[tuple[UUID, float]] = []
+    for pid, patch_bytes in by_page.items():
+        P = np.frombuffer(b"".join(patch_bytes), dtype=np.uint8).reshape(
+            len(patch_bytes), 16)                       # (P, 16)
+        xor = q[:, None, :] ^ P[None, :, :]             # (T, P, 16)
+        dist = _POPCOUNT[xor].sum(axis=2)               # (T, P) Hamming
+        sim = 128 - dist                                # (T, P) 相似度
+        score = float(sim.max(axis=1).sum())            # Σ_t max_p
+        scores.append((pid, score))
+    scores.sort(key=lambda x: (-x[1], x[0]))  # secondary sort by page_id for deterministic tiebreaking
+    return scores[:top_n]
