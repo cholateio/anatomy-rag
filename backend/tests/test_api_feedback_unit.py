@@ -168,3 +168,10 @@ async def test_feedback_route_bad_uuid_returns_400():
             delattr(app.state, "write_feedback")
         except AttributeError:
             pass
+
+
+def test_parse_feedback_non_string_text_raises():
+    # Codex 終審 P2c：非字串 text → ValueError（路由轉 400），不得滑到 500
+    cid = str(uuid.uuid4())
+    with pytest.raises(ValueError):
+        parse_feedback_body({"conversation_id": cid, "rating": 1, "text": 123})

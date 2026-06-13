@@ -148,3 +148,10 @@ def test_string_body_raises_value_error():
     """normalize_chat('x') MUST raise ValueError, not AttributeError (Fix B)."""
     with pytest.raises(ValueError, match="物件"):
         normalize_chat("x")
+
+
+def test_followup_english_pronoun_case_insensitive():
+    # Codex 終審 P2b：大寫開頭的英文指代詞也應判為追問
+    body = {"messages": [_msg("user", "What is the biceps origin?"), _msg("assistant", "x"),
+                         _msg("user", "This muscle's innervation?")]}
+    assert normalize_chat(body).is_followup is True

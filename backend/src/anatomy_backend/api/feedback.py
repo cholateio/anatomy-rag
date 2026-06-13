@@ -50,10 +50,13 @@ def parse_feedback_body(body: dict) -> FeedbackInput:
     rating_raw = body.get("rating")
     if rating_raw is None:
         raise ValueError("rating 必填")
+    text = body.get("text")
+    if text is not None and not isinstance(text, str):
+        raise ValueError(f"text 須為字串或省略，收到 {type(text).__name__}")
     return FeedbackInput(
         conversation_id=str(cid),
         rating=int(rating_raw),  # non-numeric → ValueError；None 已上方攔截
-        text=body.get("text"),
+        text=text,
     )
 
 

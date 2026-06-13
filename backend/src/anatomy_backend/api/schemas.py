@@ -54,7 +54,8 @@ def _is_followup(query: str, prev_query: str | None) -> bool:
         return False
     if len(query.strip()) < _FOLLOWUP_LEN:
         return True
-    return any(p in query for p in _PRONOUNS)
+    # 英文指代詞大小寫不敏感；中文不受 lower() 影響（規則 OPEN，Phase 11 調校）
+    return any(p in query.lower() for p in _PRONOUNS)
 
 
 def normalize_chat(body: dict) -> NormalizedChat:
