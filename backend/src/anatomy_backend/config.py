@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     pg_direct_url: str
     redis_url: str
 
+    # Redis socket 逾時（秒）：Redis 接受連線後 stall 時，避免 cache/ratelimit 的 await 無限卡死。
+    # fail-open 對「例外」有效、對「無限 hang」無效——逾時把 hang 轉成例外讓 fail-open 生效
+    # （§1.8 / Codex 終審 P2）。0.5s 遠高於正常 LAN redis 延遲（<5ms），只在真 stall 時觸發。
+    redis_socket_timeout_seconds: float = 0.5
+
     # asyncpg pool 大小（§3.4 PgBouncer default_pool_size=25 上游守恆：max_size*workers ≤ 25）
     db_pool_min_size: int = 2
     db_pool_max_size: int = 10

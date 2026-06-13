@@ -68,7 +68,14 @@ async def lifespan(app: FastAPI):
     # ── Redis ──────────────────────────────────────────────────────────────
     import redis.asyncio as aioredis
 
-    redis_client = aioredis.from_url(settings.redis_url, decode_responses=False)
+    # socket_timeout/connect_timeout：令 cache/ratelimit 的 fail-open 對 Redis stall 也生效
+    # （否則 await 可無限卡死整個 /chat，Codex 終審 P2）。
+    redis_client = aioredis.from_url(
+        settings.redis_url,
+        decode_responses=False,
+        socket_timeout=settings.redis_socket_timeout_seconds,
+        socket_connect_timeout=settings.redis_socket_timeout_seconds,
+    )
 
     # ── ML / cache clients ─────────────────────────────────────────────────
     encoder = build_encoder(settings)
