@@ -17,6 +17,7 @@ import pytest
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 
 _DB_ENV_READY = bool(os.environ.get("DATABASE_URL")) and bool(os.environ.get("PG_DIRECT_URL"))
+_REDIS_ENV_READY = bool(os.environ.get("REDIS_URL"))
 
 
 def pytest_configure(config):
@@ -24,6 +25,9 @@ def pytest_configure(config):
     # 不允許 db 測試整批 skip 還回綠燈（假綠防呆，Codex 審查 MEDIUM）
     if os.environ.get("REQUIRE_DB_TESTS") == "1" and not _DB_ENV_READY:
         raise pytest.UsageError("REQUIRE_DB_TESTS=1 但缺 DATABASE_URL / PG_DIRECT_URL")
+
+    if os.environ.get("REQUIRE_REDIS_TESTS") == "1" and not _REDIS_ENV_READY:
+        raise pytest.UsageError("REQUIRE_REDIS_TESTS=1 但缺 REDIS_URL")
 
     # destructive 守門：防止 db 測試誤射生產或共用 DB
     if _DB_ENV_READY:
