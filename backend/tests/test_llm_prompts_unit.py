@@ -1,5 +1,4 @@
 import pytest
-
 from anatomy_backend.llm import prompts
 
 

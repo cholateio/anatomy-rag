@@ -8,7 +8,8 @@ from __future__ import annotations
 
 # 行為準則為靜態常數；動態的教科書摘錄/頁面圖像/使用者問題由 build_user_text() 與
 # build_chat_messages() 組進 user message（§5.5 權威訊息結構）。
-SYSTEM_PROMPT_V1 = """你是一位協助醫學系學生學習解剖學的助教。使用者皆為醫學相關科系學生，具備基本醫學素養。
+SYSTEM_PROMPT_V1 = """\
+你是一位協助醫學系學生學習解剖學的助教。使用者皆為醫學相關科系學生，具備基本醫學素養。
 
 【行為準則】
 1. 僅能基於下方提供的「教科書摘錄」與「教科書頁面圖像」回答。

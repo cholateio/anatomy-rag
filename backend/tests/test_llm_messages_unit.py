@@ -2,7 +2,6 @@ import base64
 import inspect
 
 import pytest
-
 from anatomy_backend.llm import (
     PIILeakError,
     assert_no_identifiers,

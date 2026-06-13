@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import base64
 import json
-from typing import AsyncIterator, Protocol, runtime_checkable
+from collections.abc import AsyncIterator
+from typing import Protocol, runtime_checkable
 
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_MAX_COMPLETION_TOKENS = 1500
