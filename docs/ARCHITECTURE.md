@@ -217,7 +217,7 @@ T+10s   [SSE]   "done"；並行 asyncio.create_task：寫 query_logs / 寫快取
 | TT-complete（完整回應） | < 15s | `chat.tt_complete` |
 | Encoder（校內主 / Modal 備） | < 100ms / < 300ms（中文 query 含 MT：< 150ms / < 350ms，DL-020） | `encoder.latency` |
 | Stage A | < 30ms | `retrieval.stage_a.latency` |
-| Stage B（100 候選，DL-013；數值待 Phase 5 壓測校準） | < 200ms | `retrieval.stage_b.latency` |
+| Stage B（100 候選，DL-013）；**DL-024 校準**：單機 K=100 僅 ~1 並發達標，並發 burst 歸 Phase 12（附錄 D.5） | < 200ms @ 低並發 | `retrieval.stage_b.latency` |
 | BM25 | < 50ms | `retrieval.bm25.latency` |
 | S3 fetch（3 圖並行） | < 100ms | `s3.fetch_top3.latency` |
 | 快取命中整體 | < 250ms | `chat.cache_hit_latency` |

@@ -8,7 +8,6 @@ from collections.abc import Sequence
 from uuid import UUID
 
 import asyncpg
-
 from anatomy_shared.binary import pooled_to_halfvec_literal
 
 _STAGE_A_SQL = """

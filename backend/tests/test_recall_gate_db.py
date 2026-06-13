@@ -1,10 +1,8 @@
 import os
-import uuid
 
 import asyncpg
 import numpy as np
 import pytest
-
 from anatomy_backend.config import Settings
 from anatomy_backend.db.pool import create_pool
 from anatomy_backend.retrieval.orchestrator import retrieve

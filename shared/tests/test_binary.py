@@ -141,8 +141,8 @@ def test_hamming_distance_length_mismatch_raises():
 
 
 def test_pooled_to_halfvec_literal_format():
-    from anatomy_shared.binary import pooled_to_halfvec_literal
     import numpy as np
+    from anatomy_shared.binary import pooled_to_halfvec_literal
     lit = pooled_to_halfvec_literal(np.array([0.5, -0.25] + [0.0] * 126, dtype=np.float32))
     assert lit.startswith("[") and lit.endswith("]")
     parts = lit[1:-1].split(",")

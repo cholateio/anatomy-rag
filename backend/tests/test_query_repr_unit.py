@@ -2,7 +2,6 @@ import base64
 import struct
 
 import pytest
-
 from anatomy_backend.retrieval.query_repr import QueryRepr
 
 

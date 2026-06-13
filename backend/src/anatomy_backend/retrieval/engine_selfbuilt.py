@@ -13,7 +13,13 @@ _STAGE_B = {"sql": stage_b_maxsim, "numpy": stage_b_maxsim_numpy}
 
 @dataclass
 class SelfBuiltEngine:
-    """stage_b_mode: 'sql'（spec 主路徑）| 'numpy'（並發退路）；預設由 benchmark gate 決定。"""
+    """self-built 兩階段引擎。stage_b_mode（DL-024）：
+    - 'sql'（DEFAULT，§4.4 主路徑）：Phase 5 並發 benchmark 證實 SQL 恆優於 numpy。
+    - 'numpy'（已測非預設替代）：§4.4 應用層 XOR+popcount。Phase 5 benchmark（DL-024）
+      推翻其作為「並發退路」的假設——每個並發層級皆比 SQL 慢（單查詢 184 vs 159ms；
+      c32 達 6.5s，因持連線做 Python 計算 + 大量 BitString→bytes + GIL 爭用）。保留為
+      §4.7 介面後的已測參考，不作預設、不作並發退路。
+    """
     stage_b_mode: str = "sql"
 
     def __post_init__(self) -> None:

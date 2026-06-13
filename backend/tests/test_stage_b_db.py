@@ -3,7 +3,6 @@ import uuid
 
 import numpy as np
 import pytest
-
 from anatomy_backend.config import Settings
 from anatomy_backend.db.pool import create_pool
 from anatomy_backend.retrieval.stage_b import stage_b_maxsim

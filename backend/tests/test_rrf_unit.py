@@ -21,7 +21,8 @@ def test_rrf_rewards_consensus():
 def test_rrf_formula_and_k():
     a = uuid.uuid4()
     fused = rrf_fuse([[uuid.uuid4(), a]], k=10)  # a 在 rank 1
-    assert abs(fused[1][1] - 1.0 / (10 + 1)) < 1e-9  # plan had fused[0][1] — bug: a is rank 1 so score lands at index 1
+    # a 的分數 1/(10+1) 落在 index 1（rank 0 的匿名 uuid 分數 1/10 較高）
+    assert abs(fused[1][1] - 1.0 / (10 + 1)) < 1e-9
 
 
 def test_rrf_empty_lists():

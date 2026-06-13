@@ -1,16 +1,15 @@
 import json
+import os
 import uuid
 
 import numpy as np
 import pytest
-
 from anatomy_backend.config import Settings
 from anatomy_backend.db.pool import create_pool
 from anatomy_backend.db.tx_helpers import hnsw_search_txn
 from anatomy_backend.retrieval.stage_a import stage_a_coarse
 
 pytestmark = pytest.mark.db
-import os
 
 
 @pytest.fixture

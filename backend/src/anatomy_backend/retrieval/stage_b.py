@@ -14,9 +14,7 @@ from collections.abc import Sequence
 from uuid import UUID
 
 import asyncpg
-
 import numpy as np
-
 from anatomy_shared.binary import to_pg_bits
 
 # 256-entry uint8 popcount 查表（一次建好）
@@ -96,5 +94,6 @@ async def stage_b_maxsim_numpy(
         sim = 128 - dist                                # (T, P) 相似度
         score = float(sim.max(axis=1).sum())            # Σ_t max_p
         scores.append((pid, score))
-    scores.sort(key=lambda x: (-x[1], x[0]))  # secondary sort by page_id for deterministic tiebreaking
+    # 次序鍵 page_id：分數並列時輸出決定性（對齊 SQL ORDER BY … page_id ASC）
+    scores.sort(key=lambda x: (-x[1], x[0]))
     return scores[:top_n]

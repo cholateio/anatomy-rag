@@ -1,7 +1,6 @@
 import os
 
 import pytest
-
 from anatomy_backend.config import Settings
 from anatomy_backend.db.pool import create_pool
 from anatomy_backend.retrieval.bm25 import bm25_search

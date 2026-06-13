@@ -61,6 +61,8 @@ jobs:
       # anatomy-ingest depends on docling (which pulls torch/torchvision) — too heavy for the
       # unit job; synced here instead so ingest tests run in the db-integration job.
       - run: uv sync --package anatomy-ingest --inexact
+      # anatomy-eval：Phase 5 Stage B db 測試 import anatomy_eval.reference.maxsim_hamming（oracle）
+      - run: uv sync --package anatomy-eval --inexact
       - name: 安裝 psql client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
       - name: 驗證 PgBouncer 代理路徑（:6432 → postgres）

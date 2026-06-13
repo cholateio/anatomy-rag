@@ -20,11 +20,9 @@ import os
 import statistics
 import sys
 import time
-import uuid
 
 import asyncpg
 import numpy as np
-
 from anatomy_backend.db.tx_helpers import hnsw_search_txn
 from anatomy_backend.retrieval.stage_b import stage_b_maxsim, stage_b_maxsim_numpy
 
@@ -71,8 +69,9 @@ async def cleanup(conn, book_id):
 
 async def _run_path(pool, fn, page_ids, n_cand, iters, concurrency, rng):
     """模型生產 Stage B：在 hnsw_search_txn + savepoint 內跑（pin 連線、同生產 txn 生命週期），
-    latency 從 pool.acquire 之前起算（含 queue 等待）。offered concurrency = burst；pool < concurrency
-    時於 acquire 排隊——numpy 占用連線做 Python compute 的代價會反映在 p95（Codex review #1）。"""
+    latency 從 pool.acquire 之前起算（含 queue 等待）。offered concurrency = burst；
+    pool < concurrency 時於 acquire 排隊——numpy 占用連線做 Python compute 的代價反映在
+    p95（Codex review #1）。"""
     sem = asyncio.Semaphore(concurrency)
     latencies = []
 
