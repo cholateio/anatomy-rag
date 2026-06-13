@@ -1,12 +1,11 @@
 from types import SimpleNamespace
 
 import pytest
-
 from anatomy_backend.llm import PIILeakError
 from anatomy_backend.llm.client import (
     DEFAULT_MAX_COMPLETION_TOKENS,
-    LLMClient,
     TOKEN_LIMIT_PARAM,
+    LLMClient,
 )
 
 

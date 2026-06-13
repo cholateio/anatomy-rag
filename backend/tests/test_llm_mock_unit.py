@@ -1,8 +1,7 @@
 import httpx
 import pytest
-from openai import APITimeoutError
-
 from anatomy_backend.llm.mock import MockLLMClient
+from openai import APITimeoutError
 
 
 async def test_deterministic_token_stream():

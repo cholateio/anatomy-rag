@@ -108,7 +108,7 @@ class ModelFallbackClient:
                     self.consecutive_errors += 1
                     if self.consecutive_errors >= self._switch_threshold:
                         self.using_fallback = True
-                    raise  # 交 tenacity 重試 + backoff（APIConnectionError 不在此，直接交 tenacity）
+                    raise  # 交 tenacity 重試 + backoff（APIConnectionError 不在此直接交 tenacity）
                 # 建立成功（with attempt 正常結束）
                 self.consecutive_errors = 0
                 _ok = True

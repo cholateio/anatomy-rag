@@ -1,5 +1,7 @@
 import httpx
 import pytest
+from anatomy_backend.llm.fallback import ModelFallbackClient
+from anatomy_backend.llm.mock import MockLLMClient
 from openai import (
     APIConnectionError,
     APITimeoutError,
@@ -7,9 +9,6 @@ from openai import (
     RateLimitError,
 )
 from tenacity import wait_none
-
-from anatomy_backend.llm.fallback import ModelFallbackClient
-from anatomy_backend.llm.mock import MockLLMClient
 
 _REQ = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
 

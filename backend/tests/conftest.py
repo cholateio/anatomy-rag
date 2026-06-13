@@ -93,3 +93,20 @@ async def clean_db(db_conn):
         "TRUNCATE books, query_logs, ingest_errors RESTART IDENTITY CASCADE"
     )
     return db_conn
+
+
+@pytest.fixture(autouse=True)
+def _block_live_openai(request, monkeypatch):
+    """Codex F5：任何 test_llm_* 測試若真打 OpenAI（含經 LLMClient/build_llm 的間接路徑），
+    立即失敗。llm 測試一律用 MockLLMClient 或注入 fake。"""
+    if not request.node.fspath.basename.startswith("test_llm_"):
+        return
+    try:
+        from openai.resources.chat.completions import AsyncCompletions
+    except Exception:
+        return
+
+    async def _boom(*a, **k):
+        raise RuntimeError("LLM 測試禁止真打 OpenAI（請用 MockLLMClient 或注入 fake client）")
+
+    monkeypatch.setattr(AsyncCompletions, "create", _boom)
