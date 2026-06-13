@@ -24,6 +24,8 @@ jobs:
         run: "! grep -rInE --include='*.py' 'def (binarize|to_pg_bits|pool_patches|hamming_distance)\\(' backend ingest eval colpali_service || (echo '向量運算函式只能定義在 shared/binary.py' && exit 1)"
       - name: 確認 ingest 離線管線無雲端 LLM SDK（CLAUDE.md 紅線）
         run: "! grep -rInE --include='*.py' '(import|from)\\s+(openai|anthropic)\\b' ingest/src || (echo '離線管線禁 import 雲端 LLM SDK' && exit 1)"
+      - name: 確認語意快取層無雲端 LLM SDK（DL-012：本地比對、零 OpenAI）
+        run: "! grep -rInE --include='*.py' '^\\s*(import|from)\\s+openai\\b' backend/src/anatomy_backend/cache || (echo '語意快取禁 import openai（線上 lookup 本地比對，DL-012）' && exit 1)"
       - run: uv run --no-sync pytest backend/tests shared/tests colpali_service/tests eval/tests -q
 
   db-integration:                        # Phase 2 起有 DB/檢索測試；Phase 0 驗 migrate 框架可執行
@@ -80,6 +82,7 @@ jobs:
           PG_DIRECT_URL: postgresql://anatomy:anatomy_dev_pw@localhost:5432/anatomy_rag
           REDIS_URL: redis://localhost:6379/0
           REQUIRE_DB_TESTS: "1"                  # conftest guard 用；防止 env 漏傳導致整批 skip 假綠
+          REQUIRE_REDIS_TESTS: "1"               # conftest guard：REDIS_URL 漏傳時 fail（防快取整合測試假綠）
           ANATOMY_DB_TESTS_ALLOW_DESTRUCTIVE: "1"  # CI DB 為可拋棄環境；允許 TRUNCATE/downgrade
         run: uv run --no-sync pytest backend/tests ingest/tests -q -m "db or integration"
 
