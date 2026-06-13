@@ -33,6 +33,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 _TEXT_ID = "t0"
 
+# DB CHECK 合法值（migration 005）——與 main._log_query 共用，防止 split-brain。
+ALLOWED_LOG_STATUSES = ("ok", "llm_error", "encoder_error", "retrieval_error", "cancelled")
+
 
 @dataclass
 class ChatDeps:
@@ -151,14 +154,14 @@ async def chat_event_stream(
             forbidden_identifiers=forbidden,
         ):
             if await deps.is_disconnected():
-                status = "client_disconnect"
+                status = "cancelled"
                 break
             answer_parts.append(delta)
             yield ais.sse_event(ais.text_delta_part(_TEXT_ID, delta))
     except Exception:  # noqa: BLE001  [F8/M] LLM 串流失敗契約
         logger.exception("LLM 串流失敗")
         yield ais.sse_event({"type": "error", "errorText": "生成失敗，請重試"})
-        status = "error"
+        status = "llm_error"
         yield ais.sse_event(ais.text_end_part(_TEXT_ID))
         yield ais.done_event()
         # [F1/H] spawn log，MUST NOT emit finish/verification
@@ -168,7 +171,7 @@ async def chat_event_stream(
                 query=normalized.query,
                 conversation_id=normalized.conversation_id,
                 cache_hit=False,
-                status="error",
+                status="llm_error",
                 model_used=None,
             )
         )

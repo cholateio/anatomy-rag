@@ -7,12 +7,17 @@
   - 終止為字面 `data: [DONE]\\n\\n`
   - 標頭 x-vercel-ai-ui-message-stream == v1
 
+golden 來源：infra/golden/ai_stream_golden.jsonl（手工維護與後端 emitter 對齊）。
+Phase 10 的 frontend/scripts/dump-golden-stream.mjs 會從真實 Vercel AI SDK 重新生成；
+後端測試斷言手工 emitter 與 golden 一致（type 序列 + 靜態幀逐字 + data-sources 結構）。
+
 設計：httpx.ASGITransport（無 LifespanManager → lifespan 不跑）；
   dependency_overrides 注入 User；app.state 手動設定 ratelimiter / build_chat_deps。
 """
 from __future__ import annotations
 
 import json
+import pathlib
 from uuid import uuid4
 
 import httpx
@@ -24,6 +29,9 @@ from anatomy_backend.cache import NoOpCache
 from anatomy_backend.encoder.client import MockEncoderClient
 from anatomy_backend.llm.mock import MockLLMClient
 from anatomy_backend.retrieval.types import RetrievalResult
+
+# golden 路徑：backend/tests/ → repo_root/infra/golden/
+_GOLDEN_PATH = pathlib.Path(__file__).parents[2] / "infra" / "golden" / "ai_stream_golden.jsonl"
 
 # ── 固定測試 tokens（與 golden 對齊）────────────────────────────────────────
 _TOKENS = ["肱二頭肌", "起於喙突 [Gray, p.812, Fig.7-23]。"]
@@ -81,6 +89,34 @@ def _parse_sse_parts(text: str) -> list:
     return parts
 
 
+def _load_golden() -> list:
+    """Load golden JSONL → parsed part list（[DONE] 保留為字串）。"""
+    parts = []
+    for line in _GOLDEN_PATH.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parsed = json.loads(line)
+        parts.append("[DONE]" if parsed == "[DONE]" else parsed)
+    return parts
+
+
+def _normalize_for_diff(parts: list) -> list:
+    """snippet 為測試固定值但不鎖定全文——比對前移除以避免 golden 漂移。"""
+    normalized = []
+    for p in parts:
+        if isinstance(p, dict) and p.get("type") == "data-sources":
+            p = dict(p)
+            data = dict(p.get("data", {}))
+            sources = [dict(s) for s in data.get("sources", [])]
+            for s in sources:
+                s.pop("snippet", None)
+            data["sources"] = sources
+            p["data"] = data
+        normalized.append(p)
+    return normalized
+
+
 # ── 端到端 SSE golden 測試 ────────────────────────────────────────────────────
 
 
@@ -102,7 +138,11 @@ def _cleanup_app_state():
 
 
 async def test_end_to_end_sse_wire_matches_golden_contract():
-    """[F7] 實際 wire bytes 驗證：frame 格式、順序、標頭、[DONE]。"""
+    """[F7] 實際 wire bytes 驗證：frame 格式、順序、標頭、[DONE]；序列與 golden 對齊。
+
+    Phase 10 的 frontend/scripts/dump-golden-stream.mjs 會從真實 Vercel AI SDK 重新生成
+    infra/golden/ai_stream_golden.jsonl；本測試斷言後端手工 emitter 與 golden 一致。
+    """
     from anatomy_backend.api.main import app
 
     # ── 注入 fakes（不啟動 lifespan）────────────────────────────────────────
@@ -159,10 +199,10 @@ async def test_end_to_end_sse_wire_matches_golden_contract():
     non_empty_blocks = [b.strip() for b in raw.split("\n\n") if b.strip()]
     sse_blocks = [b for b in non_empty_blocks if b.startswith("data:")]
     # ping / comment 行忽略（: ping ...），只驗 data 行
-    # start, sources, text-start, 2×delta, text-end, verification, finish
+    # start, sources, text-start, 2×delta, text-end, verification, finish, [DONE]
     assert len(sse_blocks) >= 8, "應有至少 8 個 data 幀"
 
-    # [F7] 靜態 frame 逐字比對
+    # [F7] 靜態 frame 逐字比對（byte-exact）
     def _frame(obj: dict) -> str:
         return "data: " + json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
 
@@ -179,10 +219,17 @@ async def test_end_to_end_sse_wire_matches_golden_contract():
     # [F7] 終止為字面 data: [DONE]\n\n
     assert raw.endswith("data: [DONE]\n\n"), f"終止符不符：最後 50 chars = {raw[-50:]!r}"
 
-    # [F7] 解析驗 data-sources 形狀（不鎖 snippet 全文）
+    # ── 解析 + golden 比對 ──────────────────────────────────────────────────
     parts = _parse_sse_parts(raw)
     types = [p if p == "[DONE]" else p["type"] for p in parts]
 
+    # golden 比對：type 序列 + 正規化後完整結構（snippet 排除）
+    golden_parts = _load_golden()
+    assert _normalize_for_diff(parts) == _normalize_for_diff(golden_parts), (
+        "SSE 序列與 golden 不符；若後端 emit 格式改變請同步更新 infra/golden/ai_stream_golden.jsonl"
+    )
+
+    # data-sources 結構驗證
     src = next(p for p in parts if isinstance(p, dict) and p["type"] == "data-sources")
     assert src.get("transient") is True
     assert src["data"]["sources"][0]["page"] == 812

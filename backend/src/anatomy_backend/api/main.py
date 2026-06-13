@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from anatomy_backend.api import chat, feedback
-from anatomy_backend.api.chat import ChatDeps
+from anatomy_backend.api.chat import ALLOWED_LOG_STATUSES, ChatDeps
 from anatomy_backend.api.ratelimit import TOKEN_BUCKET_LUA, RateLimiter
 from anatomy_backend.cache import build_cache
 from anatomy_backend.config import get_settings
@@ -95,11 +95,14 @@ async def lifespan(app: FastAPI):
 
     else:
         import boto3  # type: ignore[import-untyped]
+        import httpx as _httpx
 
         s3 = boto3.client(
             "s3",
             endpoint_url=settings.s3_endpoint,
         )
+        # 單一共用 client（Fix 4: 避免每次 fetch_bytes 開新連線）
+        _shared_http = _httpx.AsyncClient()
 
         def sign_url(uri: str) -> str:
             bucket, key = uri.replace("s3://", "", 1).split("/", 1)
@@ -108,13 +111,10 @@ async def lifespan(app: FastAPI):
             )
 
         async def fetch_bytes(uri: str) -> bytes:
-            import httpx
-
             signed = sign_url(uri)
-            async with httpx.AsyncClient() as ac:
-                r = await ac.get(signed)
-                r.raise_for_status()
-                return r.content
+            r = await _shared_http.get(signed)
+            r.raise_for_status()
+            return r.content
 
     # ── DB write helpers ───────────────────────────────────────────────────
     async def _log_query(*, user_id, query, conversation_id=None, cache_hit=False,
@@ -126,8 +126,7 @@ async def lifespan(app: FastAPI):
                     "(user_id, query_text, conversation_id, cache_hit, status, model_used) "
                     "VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6)",
                     user_id, query, conversation_id, cache_hit,
-                    status if status in ("ok", "llm_error", "encoder_error",
-                                         "retrieval_error", "cancelled") else "ok",
+                    status if status in ALLOWED_LOG_STATUSES else "ok",
                     model_used,
                 )
         except Exception:
@@ -179,6 +178,14 @@ async def lifespan(app: FastAPI):
     # ── Cleanup ────────────────────────────────────────────────────────────
     await pool.close()
     await redis_client.aclose()
+    # Fix 4: 關閉 encoder 的 httpx client（EncoderClient 才有 _http；MockEncoderClient 無）
+    _enc_http = getattr(encoder, "_http", None)
+    if _enc_http is not None:
+        await _enc_http.aclose()
+    # Fix 4: 關閉共用 fetch_bytes httpx client（real mode 才有 _shared_http）
+    _fb_http = locals().get("_shared_http")
+    if _fb_http is not None:
+        await _fb_http.aclose()
     logger.info("anatomy-rag backend lifespan 關閉")
 
 

@@ -4,7 +4,8 @@
 [F1] spawn 收集 coro → asyncio.gather 確保決定性副作用斷言。
 [F2] cache.set 僅在 all_grounded=True 時呼叫（spy 斷言）。
 [F5] fetch_bytes 為 async。
-[F8] LLM 例外 → error 事件、無 finish、[DONE] 收尾、log status=error。
+[F8] LLM 例外 → error 事件、無 finish、[DONE] 收尾、log status=llm_error（DB 合法值）。
+斷線 → log status=cancelled（DB 合法值）。
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ import json
 from uuid import uuid4
 
 from anatomy_backend.api.auth import User
-from anatomy_backend.api.chat import ChatDeps, chat_event_stream
+from anatomy_backend.api.chat import ALLOWED_LOG_STATUSES, ChatDeps, chat_event_stream
 from anatomy_backend.api.schemas import NormalizedChat
 from anatomy_backend.cache import CachedAnswer, NoOpCache
 from anatomy_backend.encoder.client import MockEncoderClient
@@ -385,4 +386,54 @@ async def test_f8_llm_stream_error_emits_error_no_finish_ends_with_done():
     assert "error" in types
     assert "finish" not in types
     assert parts[-1] == "[DONE]"
-    assert logs and logs[-1]["status"] == "error"
+    # Fix 1: LLM 失敗必須記 "llm_error"（DB CHECK 合法值），不可記 "error"
+    assert logs and logs[-1]["status"] == "llm_error"
+
+
+# ── Fix 1: DB 合法 status 常數與 chat.py emit 一致性 ─────────────────────────
+
+
+def test_allowed_log_statuses_contains_emitted_literals():
+    """ALLOWED_LOG_STATUSES 包含 chat.py 所有可能 emit 的 status 值——防 split-brain。"""
+    assert "llm_error" in ALLOWED_LOG_STATUSES   # LLM 串流例外
+    assert "cancelled" in ALLOWED_LOG_STATUSES   # 客戶端斷線
+    assert "ok" in ALLOWED_LOG_STATUSES          # 正常路徑
+    assert "encoder_error" in ALLOWED_LOG_STATUSES
+    assert "retrieval_error" in ALLOWED_LOG_STATUSES
+
+
+# ── 客戶端斷線後 log status=cancelled ────────────────────────────────────────
+
+
+async def test_disconnect_log_status_is_cancelled():
+    """客戶端斷線 → log status='cancelled'（DB CHECK 合法值，非 'client_disconnect'）。"""
+    state = {"n": 0}
+
+    async def _disc() -> bool:
+        state["n"] += 1
+        return state["n"] > 1  # 第二次檢查時斷線
+
+    logs: list = []
+    collected: list = []
+
+    async def _retrieve_one(query, query_repr, metadata_filter, kb_version, top_n):
+        return [_result()]
+
+    async def _log(**kw):
+        logs.append(kw)
+
+    deps = ChatDeps(
+        encoder=MockEncoderClient(),
+        llm=MockLLMClient(tokens=["a", "b", "c", "d"]),
+        cache=NoOpCache(),
+        retrieve_fn=_retrieve_one,
+        sign_url=lambda u: f"https://signed/{u}",
+        fetch_bytes=_fetch_bytes,
+        log_query=_log,
+        spawn=lambda coro: collected.append(coro),
+        kb_version=1,
+        is_disconnected=_disc,
+    )
+    await _collect(chat_event_stream(deps, _norm(), User("u1", False)))
+    await asyncio.gather(*collected)
+    assert logs and logs[-1]["status"] == "cancelled"

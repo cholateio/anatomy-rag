@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -57,8 +58,6 @@ class RateLimiter:
     ) -> RateLimitResult:
         if is_admin:
             return RateLimitResult(allowed=True, retry_after=0)
-        import time
-
         now = now_ms if now_ms is not None else int(time.time() * 1000)
         k_min = f"rl:min:{user_id}"
         k_day = f"rl:day:{user_id}"

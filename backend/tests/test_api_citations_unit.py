@@ -124,3 +124,42 @@ def test_verify_citations_cross_book_title_plus_edition_alias_verified():
     assert v.has_citations is True
     assert v.all_grounded is True
     assert v.unverified == []
+
+
+# ── Fix 4: 影像抓取逾時/失敗降級（不中斷回應）─────────────────────────────────
+
+
+async def test_build_citations_fetch_raises_degrades_to_no_images():
+    """fetch_bytes 拋例外 → build_citations_and_images 降級回傳 images=[]，不 raise。"""
+
+    async def _raise_fetch(uri: str) -> bytes:
+        raise TimeoutError()
+
+    results = [_r(812)]
+    cits, imgs = await build_citations_and_images(
+        results,
+        ImageRoutingDecision(indices=(0,), detail="high"),
+        sign_url=lambda u: u,
+        fetch_bytes=_raise_fetch,
+    )
+    # 降級：無影像，但 citations 仍回傳
+    assert imgs == []
+    assert len(cits) == 1
+    assert cits[0].page == 812
+
+
+async def test_build_citations_fetch_error_degrades_to_no_images():
+    """fetch_bytes 拋 RuntimeError → 降級為 images=[]，不 raise。"""
+
+    async def _error_fetch(uri: str) -> bytes:
+        raise RuntimeError("network error")
+
+    results = [_r(812)]
+    cits, imgs = await build_citations_and_images(
+        results,
+        ImageRoutingDecision(indices=(0,), detail="high"),
+        sign_url=lambda u: u,
+        fetch_bytes=_error_fetch,
+    )
+    assert imgs == []
+    assert len(cits) == 1

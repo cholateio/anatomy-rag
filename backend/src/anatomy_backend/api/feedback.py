@@ -10,10 +10,11 @@ DB schema（005_query_logs.py）：
 """
 from __future__ import annotations
 
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from anatomy_backend.api.auth import User, get_current_user
 
@@ -30,6 +31,30 @@ class FeedbackInput:
     def __post_init__(self) -> None:
         if self.rating not in (1, -1):
             raise ValueError("rating 必須為 1 或 -1（1=👍 / -1=👎）")
+
+
+def parse_feedback_body(body: dict) -> FeedbackInput:
+    """驗證並解析回饋請求 body。輸入無效時 raise ValueError / TypeError（路由層轉 400）。
+
+    規則：
+      - conversation_id 必填且必須為合法 UUID。
+      - rating 必填且必須為可轉 int 的值（FeedbackInput.__post_init__ 再驗 ∈ {1,-1}）。
+    """
+    cid = body.get("conversation_id")
+    if cid is None:
+        raise ValueError("conversation_id 必填")
+    try:
+        uuid.UUID(str(cid))
+    except (ValueError, AttributeError) as exc:
+        raise ValueError(f"conversation_id 須為合法 UUID，收到 {cid!r}") from exc
+    rating_raw = body.get("rating")
+    if rating_raw is None:
+        raise ValueError("rating 必填")
+    return FeedbackInput(
+        conversation_id=str(cid),
+        rating=int(rating_raw),  # non-numeric → ValueError；None 已上方攔截
+        text=body.get("text"),
+    )
 
 
 async def apply_feedback(
@@ -55,11 +80,10 @@ async def feedback(
 ) -> dict:
     """接收前端 👍/👎 回饋，寫入 query_logs.feedback / feedback_text。"""
     body = await request.json()
-    fb = FeedbackInput(
-        conversation_id=body.get("conversation_id"),
-        rating=int(body.get("rating", 0)),
-        text=body.get("text"),
-    )
+    try:
+        fb = parse_feedback_body(body)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="無效的回饋請求") from exc
     await apply_feedback(
         fb, user_id=user.user_id, writer=request.app.state.write_feedback
     )
