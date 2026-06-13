@@ -239,3 +239,28 @@ async def test_similar_but_different_query_no_false_hit():
     c = _cache(r)
     await c.set("肱二頭肌的起止點", "二頭肌答案", SRC, 1, verified=True)
     assert await c.get("肱三頭肌的起止點", 1) is None
+
+
+async def test_clear_kb_version_only_clears_target():
+    r = _FakeRedis()
+    c = _cache(r)
+    await c.set("q1", "a1", SRC, 1, verified=True)
+    await c.set("q2", "a2", SRC, 1, verified=True)
+    await c.set("q3", "a3", SRC, 2, verified=True)
+    await c.clear_kb_version(1)
+    assert await c.get("q1", 1) is None
+    assert await c.get("q2", 1) is None
+    assert await c.get("q3", 2) is not None   # kb2 不受影響
+
+
+async def test_clear_kb_version_fail_open_no_raise():
+    await _cache(_FakeRedis(fail=True)).clear_kb_version(1)
+
+
+async def test_clear_kb_version_mid_scan_failure_no_raise():
+    # 反 Codex#6：scan 迭代中途失敗 → fail-open（部分清除可接受，殘留靠 namespace+TTL）
+    r = _FakeRedis(scan_fail_after=1)
+    c = _cache(r)
+    await c.set("q1", "a1", SRC, 1, verified=True)
+    await c.set("q2", "a2", SRC, 1, verified=True)
+    await c.clear_kb_version(1)   # 不拋
