@@ -97,9 +97,9 @@ async def clean_db(db_conn):
 
 @pytest.fixture(autouse=True)
 def _block_live_openai(request, monkeypatch):
-    """Codex F5：任何 test_llm_* 測試若真打 OpenAI（含經 LLMClient/build_llm 的間接路徑），
-    立即失敗。llm 測試一律用 MockLLMClient 或注入 fake。"""
-    if not request.node.path.name.startswith("test_llm_"):
+    """Codex F5 + conftest guard extension：test_llm_* 與 test_api_* 測試一律禁止真打
+    OpenAI（含經 LLMClient/build_llm 的間接路徑）。一律用 MockLLMClient 或注入 fake。"""
+    if not request.node.path.name.startswith(("test_llm_", "test_api_")):
         return
     try:
         from openai.resources.chat.completions import AsyncCompletions

@@ -1,1 +1,9 @@
-{"wire":"data: {\"type\":\"start\",\"messageId\":\"fOjBxRqVLmJIvyeV\"}\n\ndata: {\"type\":\"data-sources\",\"data\":{\"citations\":[{\"book_title\":\"Gray42\",\"page\":812,\"figure\":\"Fig.7-23\",\"image_url\":\"/p/1.webp\",\"snippet\":\"肱二頭肌起於肩胛骨喙突…\",\"score\":0.91},{\"book_title\":\"Netter8\",\"page\":401,\"figure\":\"Plate 401\",\"image_url\":\"/p/2.webp\",\"snippet\":\"Biceps brachii: short head from coracoid process…\",\"score\":0.87}]}}\n\ndata: {\"type\":\"text-start\",\"id\":\"t0\"}\n\ndata: {\"type\":\"text-delta\",\"id\":\"t0\",\"delta\":\"肱二頭肌\"}\n\ndata: {\"type\":\"text-delta\",\"id\":\"t0\",\"delta\":\"起於肩胛骨喙突 [Gray42, p.812, Fig.7-23]。\"}\n\ndata: {\"type\":\"text-delta\",\"id\":\"t0\",\"delta\":\" Biceps brachii originates from the coracoid process [Netter8, p.401, Plate 401].\"}\n\ndata: {\"type\":\"text-end\",\"id\":\"t0\"}\n\ndata: {\"type\":\"finish\"}\n\ndata: [DONE]\n\n","ai_version":"6.0.197","schema_notes":{"start":"{ type: 'start', messageId?: string }","data_part":"{ type: 'data-${NAME}', data: unknown, id?: string, transient?: boolean }","text_start":"{ type: 'text-start', id: string }","text_delta":"{ type: 'text-delta', id: string, delta: string }","text_end":"{ type: 'text-end', id: string }","finish":"{ type: 'finish', finishReason?: string }","sse_line":"data: ${JSON.stringify(chunk)}\\n\\n","sse_done":"data: [DONE]\\n\\n"}}
+{"type":"start"}
+{"type":"data-sources","data":{"sources":[{"book_title":"Gray","edition":"42","page":812,"figure":"Fig.7-23","image_url":"https://signed/s3://b/p812.png","snippet":"…","score":0.9}]},"transient":true}
+{"type":"text-start","id":"t0"}
+{"type":"text-delta","id":"t0","delta":"肱二頭肌"}
+{"type":"text-delta","id":"t0","delta":"起於喙突 [Gray, p.812, Fig.7-23]。"}
+{"type":"text-end","id":"t0"}
+{"type":"data-verification","data":{"verified":true,"has_citations":true,"unverified":[]},"transient":true}
+{"type":"finish"}
+"[DONE]"

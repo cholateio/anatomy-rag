@@ -12,8 +12,6 @@ import asyncio
 import json
 from uuid import uuid4
 
-import pytest
-
 from anatomy_backend.api.auth import User
 from anatomy_backend.api.chat import ChatDeps, chat_event_stream
 from anatomy_backend.api.schemas import NormalizedChat

@@ -108,8 +108,6 @@ async def lifespan(app: FastAPI):
             )
 
         async def fetch_bytes(uri: str) -> bytes:
-            import io
-
             import httpx
 
             signed = sign_url(uri)
