@@ -61,13 +61,6 @@ async def seed(conn, n_pages):
     return book_id, page_ids
 
 
-async def cleanup(conn, book_id):
-    await conn.execute(f"DROP TABLE IF EXISTS page_patches_v{BENCH_KB}")
-    await conn.execute(
-        "DELETE FROM pages WHERE kb_version = $1 AND book_id = $2", BENCH_KB, book_id)
-    await conn.execute("DELETE FROM books WHERE book_id = $1", book_id)
-
-
 async def _run_path(pool, fn, page_ids, n_cand, iters, concurrency, rng):
     """模型生產 Stage B：在 hnsw_search_txn + savepoint 內跑（pin 連線、同生產 txn 生命週期），
     latency 從 pool.acquire 之前起算（含 queue 等待）。offered concurrency = burst；
@@ -110,27 +103,26 @@ async def main():
         os.environ["DATABASE_URL"], statement_cache_size=0,
         min_size=args.pool_size, max_size=args.pool_size)
 
-    # leftover チェック：seed_conn を try/finally で必ず解放
+    # leftover 守門：偵測殘留 bench 資料就 fail-fast，且**不刪**（留給人工檢查）；
+    # 置於 cleanup try 之外，避免 finally 誤刪他人/前次殘留。
     seed_conn = await pool.acquire()
-    try:
-        leftover = await seed_conn.fetchval(
-            "SELECT count(*) FROM pages WHERE kb_version = $1", BENCH_KB)
-        if leftover:
-            print(f"錯誤：殘留 bench 資料（kb_version={BENCH_KB}：{leftover} 列），請先清理")
-            await pool.release(seed_conn)
-            await pool.close()
-            sys.exit(1)
+    leftover = await seed_conn.fetchval(
+        "SELECT count(*) FROM pages WHERE kb_version = $1", BENCH_KB)
+    if leftover:
+        await pool.release(seed_conn)
+        await pool.close()
+        print(f"錯誤：殘留 bench 資料（kb_version={BENCH_KB}：{leftover} 列），請先清理")
+        sys.exit(1)
 
-        book_id = None
+    # 過守門後 kb_version=998 由本次 run 獨佔 → 單一 try/finally；finally 無條件清理
+    # （即使 seed 中途失敗也清掉部分資料、釋放連線、關池）。
+    book_id = None
+    try:
         print(f"seeding {args.pages} pages × {PATCHES_PER_PAGE}（首次約數分鐘）…")
         book_id, page_ids = await seed(seed_conn, args.pages)
-    finally:
-        # seed 成功後も失敗後も seed_conn を返却（二重解放防止）
-        if seed_conn is not None:
-            await pool.release(seed_conn)
-            seed_conn = None
+        await pool.release(seed_conn)
+        seed_conn = None
 
-    try:
         n_cand = min(args.candidates, len(page_ids))
         rng = np.random.default_rng(1)
 
@@ -159,6 +151,8 @@ async def main():
             sys.exit(2)
         print(f"GATE PASS：建議 production stage_b_mode='{recommend}'")
     finally:
+        if seed_conn is not None:
+            await pool.release(seed_conn)
         print("cleaning up…")
         async with pool.acquire() as c:
             await c.execute(f"DROP TABLE IF EXISTS page_patches_v{BENCH_KB}")
