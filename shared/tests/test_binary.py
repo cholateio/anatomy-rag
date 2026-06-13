@@ -138,3 +138,21 @@ def test_hamming_distance_length_mismatch_raises():
 
     with pytest.raises(ValueError):
         hamming_distance(b"\x00" * 16, b"\x00" * 15)
+
+
+def test_pooled_to_halfvec_literal_format():
+    from anatomy_shared.binary import pooled_to_halfvec_literal
+    import numpy as np
+    lit = pooled_to_halfvec_literal(np.array([0.5, -0.25] + [0.0] * 126, dtype=np.float32))
+    assert lit.startswith("[") and lit.endswith("]")
+    parts = lit[1:-1].split(",")
+    assert len(parts) == 128
+    assert float(parts[0]) == 0.5 and float(parts[1]) == -0.25
+
+
+def test_pooled_to_halfvec_literal_rejects_wrong_dim():
+    import numpy as np
+    import pytest
+    from anatomy_shared.binary import pooled_to_halfvec_literal
+    with pytest.raises(ValueError):
+        pooled_to_halfvec_literal(np.zeros(64, dtype=np.float32))

@@ -12,23 +12,11 @@ import logging
 from typing import Any
 
 import numpy as np
-from anatomy_shared.binary import to_pg_bits
+from anatomy_shared.binary import pooled_to_halfvec_literal, to_pg_bits
 
 from .types import EncodedPage, WriteOutcome
 
 logger = logging.getLogger(__name__)
-
-
-def _pooled_to_halfvec_literal(pooled: np.ndarray) -> str:
-    """float32[128] → PostgreSQL vector/halfvec 文字字面值 '[v1,v2,…]'。
-
-    halfvec 字面值僅在離線寫入用；Phase 5 query 端若需同格式可再抽到 shared。
-    用 repr 保留 float32 精度（halfvec 入庫時 PG 端再量化為 fp16）。
-    """
-    arr = np.asarray(pooled, dtype=np.float32).ravel()
-    if arr.shape[0] != 128:
-        raise ValueError(f"pooled 須 128 維，收到 {arr.shape[0]}")
-    return "[" + ",".join(f"{float(x):.7g}" for x in arr) + "]"
 
 
 async def ensure_kb_partition(conn, kb_version: int) -> None:
@@ -64,7 +52,7 @@ async def _insert_page(conn, book_id, kb_version: int, rec: dict[str, Any], enc:
         rec["page_image_uri"],
         rec["docling_md"],
         json.dumps(rec["metadata"]),
-        _pooled_to_halfvec_literal(enc.pooled_f32),
+        pooled_to_halfvec_literal(enc.pooled_f32),
         kb_version,
         enc.embed_model,
     )

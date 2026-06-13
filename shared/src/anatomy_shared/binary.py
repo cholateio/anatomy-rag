@@ -63,3 +63,15 @@ def hamming_distance(a: bytes, b: bytes) -> int:
     if len(a) != len(b):
         raise ValueError(f"長度不一致：{len(a)} vs {len(b)} bytes")
     return (int.from_bytes(a, "big") ^ int.from_bytes(b, "big")).bit_count()
+
+
+def pooled_to_halfvec_literal(vec: "np.ndarray") -> str:
+    """float32[128] → PostgreSQL halfvec 文字字面值 '[v1,v2,…]'（離線寫入與 query 端共用）。
+
+    用 repr 保留 float 精度（halfvec 入庫/比對時 PG 端再量化為 fp16）。位序無關，
+    與 binarize 不同——非檢索精度紅線，但集中於此處避免兩端格式漂移。
+    """
+    arr = np.asarray(vec, dtype=np.float32).ravel()
+    if arr.shape[0] != VECTOR_DIM:
+        raise ValueError(f"pooled 必須為 {VECTOR_DIM} 維，收到 {arr.shape[0]}")
+    return "[" + ",".join(repr(float(x)) for x in arr) + "]"
