@@ -1,4 +1,4 @@
-.PHONY: help up up-gpu up-obs down logs migrate gpu-smoke golden-bytes ingest-sample ingest-gate bench-stageb test lint fmt encoder-models encoder-gate
+.PHONY: help up up-gpu up-obs down logs migrate gpu-smoke golden-bytes ingest-sample ingest-gate bench-stageb bench-stageb-gate test lint fmt encoder-models encoder-gate
 
 help:
 	@echo "make up / up-gpu / up-obs / down / logs"
@@ -6,6 +6,7 @@ help:
 	@echo "make gpu-smoke    # 實機 GPU：build GPU encoder 並驗 torch.cuda.is_available()"
 	@echo "make golden-bytes # 產生 Vercel UI Message Stream golden wire bytes"
 	@echo "make bench-stageb  # Stage B MaxSim 延遲探針（手動；需 compose 起 DB + 已 migrate；DL-013，非 CI gate）"
+	@echo "make bench-stageb-gate  # Stage B 並發/p95 gate（手動；SQL vs numpy，建議 production mode；附錄 D.5）"
 	@echo "make test / lint / fmt / ingest-sample"
 	@echo "make encoder-models # 預拉 HF 模型進 hfcache volume（首次 ~7-8GB；GPU 路徑前置步驟）"
 	@echo "make encoder-gate   # Phase 3 encoder smoke gate（手動 GPU；需先 encoder-models）"
@@ -56,6 +57,10 @@ ingest-gate:
 bench-stageb:
 	uv sync --package anatomy-backend --inexact
 	uv run --no-sync python backend/scripts/bench_stage_b.py
+
+# Stage B 並發/p95 benchmark gate（手動，硬性驗收；非 CI）。需 compose 起 DB + 已 migrate。
+bench-stageb-gate:
+	uv run --no-sync python backend/scripts/bench_stage_b_concurrency.py
 
 # 本機測試：先同步全部 workspace 成員（避免 uv run 預設剪除成員），再以 --no-sync 跑。
 # 註：首次會安裝 ingest/encoder 的完整依賴（含 torch），之後快取於 .venv。
