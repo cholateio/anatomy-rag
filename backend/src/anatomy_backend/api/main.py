@@ -1,25 +1,194 @@
-"""FastAPI 應用進入點。Phase 0：健康探針與預熱骨架（真正的 /chat 於 Phase 8 實作）。"""
+"""FastAPI 應用進入點（Phase 8 最終版）。
 
+Lifespan 建立全鏈路 deps 並注入 app.state：
+    pool, redis, encoder, llm, cache, ratelimiter,
+    spawn (_spawn + _BG), build_chat_deps, write_feedback。
+
+設計原則：
+- import app 本身不需任何 env var（lifespan 才讀）；
+  單元測試可直接 import app 驗路由，不觸發 lifespan。
+- 測試（D4）透過 app.state.*/app.dependency_overrides 注入 fakes，
+  不啟動 lifespan。
+- production lifespan 失敗（壞設定）→ 容器啟動失敗（fail-fast，§0.3）。
+
+[F1/H] _spawn：asyncio.create_task + _BG 集合（防 GC）+ done-callback 記錯。
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from anatomy_backend.api import chat, feedback
+from anatomy_backend.api.chat import ChatDeps
+from anatomy_backend.api.ratelimit import TOKEN_BUCKET_LUA, RateLimiter
+from anatomy_backend.cache import build_cache
 from anatomy_backend.config import get_settings
+from anatomy_backend.encoder.client import build_encoder
+from anatomy_backend.llm import build_llm
+
+logger = logging.getLogger(__name__)
+
+# ── [F1/H] 模組級背景任務集合（防 create_task 參考被 GC）────────────────────
+_BG: set = set()
+
+
+def _spawn(coro) -> None:
+    """production spawn：create_task + 保留參考 + 錯誤記 log（SSE 收尾副作用）。"""
+    t = asyncio.create_task(coro)
+    _BG.add(t)
+
+    def _done(task):
+        _BG.discard(task)
+        if not task.cancelled():
+            exc = task.exception() if not task.cancelled() else None
+            if exc:
+                logger.error("bg task 失敗", exc_info=exc)
+
+    t.add_done_callback(_done)
+
+
+# ── Lifespan：全鏈路初始化（生產用；測試不觸發）──────────────────────────────
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """啟動即觸發設定驗證（fail-fast）。
+    """啟動觸發設定驗證（fail-fast）並建立全部 deps，關閉時清理。"""
+    settings = get_settings()  # 壞設定在此即拋 ValueError（容器不啟動）
 
-    缺必填變數、或 DATABASE_URL 未連 PgBouncer :6432（§0.3）會在此拋錯，
-    使容器啟動失敗、healthcheck 永不轉 healthy —— 而非以「healthy」假象掩蓋錯誤設定，
-    拖到日後某功能首次存取設定時才爆。
-    """
-    get_settings()
+    # ── DB pool ────────────────────────────────────────────────────────────
+    import asyncpg
+
+    from anatomy_backend.db.pool import build_pool_kwargs
+
+    pool = await asyncpg.create_pool(**build_pool_kwargs(settings))
+
+    # ── Redis ──────────────────────────────────────────────────────────────
+    import redis.asyncio as aioredis
+
+    redis_client = aioredis.from_url(settings.redis_url, decode_responses=False)
+
+    # ── ML / cache clients ─────────────────────────────────────────────────
+    encoder = build_encoder(settings)
+    llm = build_llm(settings)
+    cache = build_cache(settings)
+
+    # ── Ratelimiter（single Lua all-or-nothing，[F4/H]）────────────────────
+    lua_script = redis_client.register_script(TOKEN_BUCKET_LUA)
+    ratelimiter = RateLimiter(
+        script=lua_script,
+        per_min=settings.rate_limit_per_user_min,
+        per_day=settings.rate_limit_per_user_day,
+        global_rps=settings.rate_limit_global_rps,
+    )
+
+    # ── S3/MinIO helpers（mock mode：no-op lambdas）────────────────────────
+    if getattr(settings, "encoder_mock", True):
+        # dev / CI mock：不需真 S3
+        def sign_url(uri: str) -> str:
+            return f"http://localhost:9000/{uri}"
+
+        async def fetch_bytes(uri: str) -> bytes:
+            return b""
+
+    else:
+        import boto3  # type: ignore[import-untyped]
+
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=settings.s3_endpoint,
+        )
+
+        def sign_url(uri: str) -> str:
+            bucket, key = uri.replace("s3://", "", 1).split("/", 1)
+            return s3.generate_presigned_url(
+                "get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=3600
+            )
+
+        async def fetch_bytes(uri: str) -> bytes:
+            import io
+
+            import httpx
+
+            signed = sign_url(uri)
+            async with httpx.AsyncClient() as ac:
+                r = await ac.get(signed)
+                r.raise_for_status()
+                return r.content
+
+    # ── DB write helpers ───────────────────────────────────────────────────
+    async def _log_query(*, user_id, query, conversation_id=None, cache_hit=False,
+                         status="ok", model_used=None, **_kw):
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO query_logs "
+                    "(user_id, query_text, conversation_id, cache_hit, status, model_used) "
+                    "VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6)",
+                    user_id, query, conversation_id, cache_hit,
+                    status if status in ("ok", "llm_error", "encoder_error",
+                                         "retrieval_error", "cancelled") else "ok",
+                    model_used,
+                )
+        except Exception:
+            logger.warning("query_logs INSERT 失敗", exc_info=True)
+
+    async def _write_feedback(*, user_id, conversation_id, rating, text):
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE query_logs SET feedback=$1, feedback_text=$2 "
+                    "WHERE conversation_id=$3::uuid AND user_id=$4::uuid",
+                    rating, text, conversation_id, user_id,
+                )
+        except Exception:
+            logger.warning("feedback UPDATE 失敗", exc_info=True)
+
+    # ── retrieve wrapper ───────────────────────────────────────────────────
+    from anatomy_backend.retrieval.orchestrator import retrieve
+
+    async def _retrieve(query, query_repr, metadata_filter, kb_version, top_n):
+        return await retrieve(pool, query, query_repr, metadata_filter, kb_version, top_n)
+
+    # ── ChatDeps factory（注入 request.is_disconnected）────────────────────
+    def _build_chat_deps(request) -> ChatDeps:
+        return ChatDeps(
+            encoder=encoder,
+            llm=llm,
+            cache=cache,
+            retrieve_fn=_retrieve,
+            sign_url=sign_url,
+            fetch_bytes=fetch_bytes,
+            log_query=_log_query,
+            spawn=_spawn,
+            kb_version=settings.active_kb_version,
+            is_disconnected=request.is_disconnected,
+        )
+
+    # ── Publish on app.state ───────────────────────────────────────────────
+    app.state.pool = pool
+    app.state.redis = redis_client
+    app.state.ratelimiter = ratelimiter
+    app.state.spawn = _spawn
+    app.state.build_chat_deps = _build_chat_deps
+    app.state.write_feedback = _write_feedback
+
+    logger.info("anatomy-rag backend lifespan 啟動完成（pool/redis/encoder/llm/cache ready）")
     yield
 
+    # ── Cleanup ────────────────────────────────────────────────────────────
+    await pool.close()
+    await redis_client.aclose()
+    logger.info("anatomy-rag backend lifespan 關閉")
 
+
+# ── App 建立（routers 在 module 載入時即掛載，不需 lifespan）────────────────
 app = FastAPI(title="anatomy-rag-backend", version="0.0.0", lifespan=lifespan)
+
+app.include_router(chat.router)
+app.include_router(feedback.router)
 
 
 @app.get("/healthz")
@@ -30,5 +199,5 @@ async def healthz() -> dict:
 
 @app.post("/warmup")
 async def warmup() -> dict:
-    """預熱骨架：Phase 0 為 no-op；後續會在此預載 encoder client 與連線池（§5.1）。"""
+    """全鏈路預熱：觸發 encoder / llm 暖機（mock 模式為 no-op-ish）。"""
     return {"warmed": True}
