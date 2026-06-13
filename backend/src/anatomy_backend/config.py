@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     cache_local_embed_model: str = "intfloat/multilingual-e5-small"
     cache_distance_threshold: float = 0.05
     cache_ttl_seconds: int = 1209600  # 14 天
+    # 語意快取啟用旗標與比對模式（DL-025）
+    # exact：正規化後字面比對（v1 預設，決定性、誤命中極低、零 embedding 套件）
+    # semantic：本地向量比對（fastembed，torch-free）——後續 config 開關，本 phase 未實作
+    cache_enabled: bool = True
+    cache_mode: str = "exact"
 
     # ColPali encoder 微服務（獨立容器 :8001）
     colpali_primary_url: str = "http://encoder:8001/encode_query"
