@@ -90,7 +90,7 @@ async def chat_event_stream(
 
     # ── Step 1：快取（追問 MUST NOT 查/寫，DL-021）──────────────────────────
     if not normalized.is_followup:
-        cached = await deps.cache.get(normalized.query, kb)
+        cached = await deps.cache.get(normalized.query, kb, normalized.metadata_filter)
         if cached is not None:
             yield ais.sse_event(ais.start_part())
             yield ais.sse_event(ais.data_part("sources", {"sources": cached.sources}))
@@ -247,7 +247,10 @@ async def chat_event_stream(
     # [F2/H] cache.set 僅在非追問 + ok + all_grounded（防快取偽造引文答案）
     if (not normalized.is_followup) and status == "ok" and verification.all_grounded:
         deps.spawn(
-            deps.cache.set(normalized.query, answer, sources_payload, kb, verified=True)
+            deps.cache.set(
+                normalized.query, answer, sources_payload, kb,
+                verified=True, metadata_filter=normalized.metadata_filter,
+            )
         )
 
 

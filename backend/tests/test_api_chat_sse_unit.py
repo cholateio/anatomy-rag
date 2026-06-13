@@ -129,11 +129,11 @@ def _cleanup_app_state():
     yield
     app.dependency_overrides.clear()
     app.dependency_overrides.update(original_overrides)
-    # 清理手動設定的 state 欄位
+    # 清理手動設定的 state 欄位（Starlette State.__delattr__ 拋 KeyError 而非 AttributeError）
     for attr in ("ratelimiter", "build_chat_deps"):
         try:
             delattr(app.state, attr)
-        except AttributeError:
+        except (AttributeError, KeyError):
             pass
 
 
@@ -289,3 +289,71 @@ async def test_sse_ratelimit_returns_429():
 
     assert resp.status_code == 429
     assert resp.headers.get("retry-after") == "3"
+
+
+# ── Task 6：metadata_filter 傳遞測試 ─────────────────────────────────────────
+
+
+def _make_chat_deps(cache=None) -> ChatDeps:
+    """複用既有 fake 組 ChatDeps（spawn 為 close-immediately placeholder，測試可覆寫）。"""
+    return ChatDeps(
+        encoder=MockEncoderClient(),
+        llm=MockLLMClient(tokens=_TOKENS),
+        cache=cache or NoOpCache(),
+        retrieve_fn=_retrieve,
+        sign_url=lambda u: f"https://signed/{u}",
+        fetch_bytes=_fetch_bytes,
+        log_query=_log,
+        spawn=lambda coro: coro.close(),
+        kb_version=1,
+        is_disconnected=_never_disc,
+    )
+
+
+def _make_user() -> User:
+    return User("u1", False)
+
+
+async def test_chat_threads_metadata_filter_into_cache():
+    """chat 將 metadata_filter 傳給 cache.get（lookup）與 cache.set（write）。"""
+    from anatomy_backend.api.chat import chat_event_stream
+    from anatomy_backend.api.schemas import normalize_chat
+
+    class _RecordingCache:
+        def __init__(self):
+            self.get_args = []
+            self.set_args = []
+
+        async def get(self, query, kb_version, metadata_filter=None):
+            self.get_args.append((query, kb_version, metadata_filter))
+            return None   # 強制 miss → 走完整流程到 set
+
+        async def set(self, query, answer, sources, kb_version, *, verified, metadata_filter=None):
+            self.set_args.append((query, kb_version, verified, metadata_filter))
+
+    cache = _RecordingCache()
+    mf = {"anatomy_system": "musculoskeletal"}
+    normalized = normalize_chat({
+        "messages": [{"role": "user", "content": "肱二頭肌的起止點"}],
+        "metadata_filter": mf,
+    })
+    deps = _make_chat_deps(cache=cache)
+    user = _make_user()
+
+    spawned = []
+    deps.spawn = lambda coro: spawned.append(coro)
+
+    async for _ in chat_event_stream(deps, normalized, user):
+        pass
+
+    # 收尾 spawn 的 cache.set coroutine 需被執行
+    for coro in spawned:
+        try:
+            await coro
+        except Exception:
+            pass
+
+    assert cache.get_args, "cache.get 應被呼叫"
+    assert cache.get_args[0][2] == mf, f"cache.get 的 metadata_filter 應為 {mf}，實得 {cache.get_args[0][2]}"
+    assert cache.set_args, "cache.set 應被呼叫（需 status=ok + all_grounded=True）"
+    assert cache.set_args[0][3] == mf, f"cache.set 的 metadata_filter 應為 {mf}，實得 {cache.set_args[0][3]}"

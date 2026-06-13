@@ -218,7 +218,7 @@ async def test_pii_user_id_in_forbidden_identifiers():
 
 async def test_cache_hit_short_circuits_with_sources_and_done():
     class _HitCache(NoOpCache):
-        async def get(self, q, kb):
+        async def get(self, q, kb, metadata_filter=None):
             return CachedAnswer(
                 answer="快取答案 [Gray, p.812]。",
                 sources=[
@@ -344,7 +344,7 @@ async def test_f2_cache_set_called_when_all_grounded():
         def __init__(self):
             self.set_count = 0
 
-        async def set(self, query, answer, sources, kb, *, verified):
+        async def set(self, query, answer, sources, kb, *, verified, metadata_filter=None):
             self.set_count += 1
 
     spy = _SpyCache()

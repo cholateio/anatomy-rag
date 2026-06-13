@@ -73,7 +73,7 @@ async def lifespan(app: FastAPI):
     # ── ML / cache clients ─────────────────────────────────────────────────
     encoder = build_encoder(settings)
     llm = build_llm(settings)
-    cache = build_cache(settings)
+    cache = build_cache(settings, redis_client)
 
     # ── Ratelimiter（single Lua all-or-nothing，[F4/H]）────────────────────
     lua_script = redis_client.register_script(TOKEN_BUCKET_LUA)
