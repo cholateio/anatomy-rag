@@ -78,3 +78,57 @@ def assert_no_identifiers(messages: list[dict], forbidden: frozenset[str]) -> No
         raise PIILeakError(
             f"OpenAI payload 含禁止識別資訊（{len(leaked)} 項），fail-closed 拒送"
         )
+
+
+from openai import AsyncOpenAI  # noqa: E402  （置檔尾與常數/純函式分區）
+
+
+class LLMClient:
+    """單一模型的原生 openai async 串流客戶端（§5.5）。
+
+    max_retries=0：關閉 SDK 內建重試，讓 tenacity + ModelFallbackClient 計數看到每次失敗。
+    可注入 client 供測試（零 API 呼叫）。送 OpenAI 前先 assert_no_identifiers fail-closed。
+    """
+
+    def __init__(
+        self,
+        model: str,
+        *,
+        api_key: str = "",
+        base_url: str | None = None,
+        client: AsyncOpenAI | None = None,
+        temperature: float = DEFAULT_TEMPERATURE,
+        max_completion_tokens: int = DEFAULT_MAX_COMPLETION_TOKENS,
+    ) -> None:
+        self._model = model
+        self._temperature = temperature
+        self._max_completion_tokens = max_completion_tokens
+        self._client = client or AsyncOpenAI(
+            api_key=api_key, base_url=base_url, max_retries=0
+        )
+
+    async def stream_complete(
+        self,
+        system: str,
+        user: str,
+        images: list[bytes],
+        *,
+        image_detail: str = DEFAULT_IMAGE_DETAIL,
+        forbidden_identifiers: frozenset[str] = frozenset(),
+    ) -> AsyncIterator[str]:
+        messages = build_chat_messages(system, user, images, image_detail=image_detail)
+        assert_no_identifiers(messages, forbidden_identifiers)  # fail-closed，送出前
+        kwargs = {
+            "model": self._model,
+            "messages": messages,
+            "stream": True,
+            "temperature": self._temperature,
+            TOKEN_LIMIT_PARAM: self._max_completion_tokens,
+        }
+        stream = await self._client.chat.completions.create(**kwargs)
+        async for chunk in stream:
+            if not chunk.choices:  # usage-only chunk
+                continue
+            delta = chunk.choices[0].delta
+            if delta.content:  # 首尾 chunk content 為 None
+                yield delta.content
