@@ -1614,3 +1614,14 @@ async def test_end_to_end_sse_wire_matches_golden_contract(monkeypatch):
 - §5.6 SSE 九步 → D1 ✓；§5.7 schema/PageCitation/build_citations → A1/B2 ✓；§5.8 auth → C1 ✓；§5.9 DL-021 → A1+D1 ✓；§6.4 cache seam → A3（真 impl Phase 7）✓；§6.5 feedback → D2 ✓；§6.8 ratelimit → C2 ✓；DL-009 附圖 → D1（route_images）✓；DL-012 連線+引文驗證 → D1+B2 ✓；DL-018 emitter → B1 ✓；DL-022 限流不寫 DB → C2 ✓。
 - Placeholder scan：高風險/契約檔具完整碼；main.py/storage 細節為「擴充既有 + 注入點」說明（實作者依既有 db/pool、ingest storage 模式補；spec-reviewer 驗）。
 - Type consistency：`NormalizedChat`、`PageCitation`、`QueryRepr`、`ImageRoutingDecision`、`stream_complete(...forbidden_identifiers=)`、`retrieve(...)`、`ChatDeps`、`RateLimitResult`、`User`、`CachedAnswer` 跨檔一致。
+
+---
+
+## 終審後狀態與已知限制（review 收斂）
+
+實作經 Opus spec/品質雙審 + Codex 終審 + Codex 確認，收斂修正：status DB 合法值（llm_error/cancelled）、golden 接線、feedback 400/UUID、影像逾時降級、encoder/retrieval 串流內失敗→error event+狀態 log（P1c）、非物件 body→400（P2）、追問英文指代詞大小寫不敏感（P2b）、非字串 feedback text→400（P2c）。**83 api 測試綠、全程 mock 零真實 OpenAI、全 unit 無回歸。**
+
+**已知限制（刻意延後，非缺陷）：**
+1. **真實 S3/MinIO 取頁圖未接線**：非 mock 模式 `sign_url`/`fetch_bytes` raise 清楚的 `NotImplementedError`。接線需後端**新增 boto3 依賴**（「新套件先問」）+ S3 憑證（`S3_ACCESS_KEY`/`S3_SECRET_KEY`）。Phase 8 為 mock-first、real-encoder 部署前須補（待使用者核可 boto3）。
+2. **feedback 目前以 conversation_id 更新**：多輪對話同 conversation 有多列 query_logs，👍/👎 會套用到該會話所有回合。正解需前端（Phase 10）於 SSE/回饋帶**每回合識別碼（message_id / query_log id）**，後端據此精準更新單列。Phase 8 後端先以 conversation 粒度落地，Phase 10 接 message_id。
+3. **query intent 仍為 heuristic**（DL-009 OPEN）；真分類器後續。`/warmup` mock 為近 no-op；真實預熱於部署。
