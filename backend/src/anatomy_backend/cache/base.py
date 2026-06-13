@@ -14,7 +14,9 @@ class CachedAnswer:
 
 
 class CacheProtocol(Protocol):
-    async def get(self, query: str, kb_version: int) -> CachedAnswer | None: ...
+    async def get(
+        self, query: str, kb_version: int, metadata_filter: dict | None = None
+    ) -> CachedAnswer | None: ...
 
     async def set(
         self,
@@ -24,11 +26,14 @@ class CacheProtocol(Protocol):
         kb_version: int,
         *,
         verified: bool,
+        metadata_filter: dict | None = None,
     ) -> None: ...
 
 
 class NoOpCache:
-    async def get(self, query: str, kb_version: int) -> CachedAnswer | None:
+    async def get(
+        self, query: str, kb_version: int, metadata_filter: dict | None = None
+    ) -> CachedAnswer | None:
         return None
 
     async def set(
@@ -39,9 +44,27 @@ class NoOpCache:
         kb_version: int,
         *,
         verified: bool,
+        metadata_filter: dict | None = None,
     ) -> None:
         return None
 
 
-def build_cache(settings) -> CacheProtocol:
-    return NoOpCache()  # Phase 7 改回真 SemanticCache（依 settings）
+def build_cache(settings, redis_client=None) -> CacheProtocol:
+    """依設定回傳快取實作（DL-025）。
+
+    cache_enabled=False 或無 redis_client → NoOpCache（退路）。
+    cache_mode="exact"（v1 預設）→ SemanticCache（exact-normalized-query）。
+    cache_mode="semantic" → 後續 config 開關，尚未實作（需 fastembed，torch-free）。
+    """
+    if not getattr(settings, "cache_enabled", True) or redis_client is None:
+        return NoOpCache()
+    mode = getattr(settings, "cache_mode", "exact")
+    if mode == "exact":
+        from anatomy_backend.cache.semantic_cache import SemanticCache
+
+        return SemanticCache(redis_client, ttl_seconds=settings.cache_ttl_seconds)
+    if mode == "semantic":
+        raise NotImplementedError(
+            "cache_mode='semantic' 向量比對尚未啟用（需 fastembed，torch-free；見 DL-025 / DL-012）"
+        )
+    raise ValueError(f"未知 cache_mode：{mode!r}")

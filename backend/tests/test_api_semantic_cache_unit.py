@@ -5,7 +5,8 @@ import fnmatch
 import json
 
 import pytest
-
+from anatomy_backend.cache import NoOpCache, SemanticCache, build_cache
+from anatomy_backend.cache.semantic_cache import SemanticCache  # noqa: F811
 from anatomy_backend.config import Settings
 
 
@@ -24,9 +25,6 @@ def test_cache_config_defaults():
     assert s.cache_enabled is True
     assert s.cache_mode == "exact"
     assert s.cache_ttl_seconds == 1209600  # 14 天（7–30 天區間）
-
-
-from anatomy_backend.cache.semantic_cache import SemanticCache
 
 
 def test_normalize_trims_lowercases_collapses_ws():
@@ -264,3 +262,26 @@ async def test_clear_kb_version_mid_scan_failure_no_raise():
     await c.set("q1", "a1", SRC, 1, verified=True)
     await c.set("q2", "a2", SRC, 1, verified=True)
     await c.clear_kb_version(1)   # 不拋
+
+
+def test_build_cache_semantic_when_enabled_with_redis():
+    assert isinstance(build_cache(_settings(cache_mode="exact"), _FakeRedis()), SemanticCache)
+
+
+def test_build_cache_noop_when_disabled():
+    assert isinstance(build_cache(_settings(cache_enabled=False), _FakeRedis()), NoOpCache)
+
+
+def test_build_cache_noop_without_redis():
+    assert isinstance(build_cache(_settings(cache_enabled=True), None), NoOpCache)
+
+
+def test_build_cache_semantic_mode_not_implemented():
+    with pytest.raises(NotImplementedError):
+        build_cache(_settings(cache_mode="semantic"), _FakeRedis())
+
+
+async def test_noop_accepts_metadata_filter():
+    c = NoOpCache()
+    assert await c.get("q", 1, {"a": 1}) is None
+    await c.set("q", "a", [], 1, verified=True, metadata_filter={"a": 1})  # 不拋

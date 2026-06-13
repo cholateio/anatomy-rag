@@ -1,16 +1,18 @@
 """語意快取（§6.4 / DL-004 / DL-012 / DL-025）。
 
-v1 預設＝exact-normalized-query：把『正規化 query（NFKC→trim→casefold→摺疊空白）+ canonical metadata_filter』
-雜湊成決定性 key（namespace 含 kb_version），zero embedding 套件、決定性、誤命中極低、命中
-<30ms（§1.6）。語意向量比對為後續 config 開關（fastembed，torch-free；cache_mode="semantic"）。
+v1 預設＝exact-normalized-query：把『正規化 query（NFKC→trim→casefold→摺疊空白）+
+canonical metadata_filter』雜湊成決定性 key（namespace 含 kb_version），zero embedding
+套件、決定性、誤命中極低、命中 <30ms（§1.6）。語意向量比對為後續 config 開關
+（fastembed，torch-free；cache_mode="semantic"）。
 
 硬性規則：
 - 只快取已驗證答案：set(verified=False) 一律拒寫（信任邊界＝chat.py verify_citations, DL-012）。
 - 完整隔離：key 納入 kb_version + metadata_filter；命中時再校驗 envelope kb_version。
 - 本地 lookup：本模組 MUST NOT import openai（DL-012；CI grep 守門）。
 - Redis fail-open（§1.8）：get→miss、set/clear→no-op（含序列化/mid-scan 失敗），絕不中斷 /chat。
-誤命中：決定性正規化會把『正規化等價字串』併為同 key（如 casefold 後 US/us）；非語意比對故無向量誤命中。
-即便誤命中，回的仍是已驗證有引文的答案（安全網守住）。醫學術語 precision 語料列 Phase 11 eval gate。
+誤命中：決定性正規化會把『正規化等價字串』併為同 key（如 casefold 後 US/us）；
+非語意比對故無向量誤命中。即便誤命中，回的仍是已驗證有引文的答案（安全網守住）。
+醫學術語 precision 語料列 Phase 11 eval gate。
 DL-021 追問不查/不寫由 chat.py 控制，本類保持追問無關。
 """
 from __future__ import annotations
@@ -73,7 +75,7 @@ class SemanticCache:
     def _key(self, query: str, kb_version: int, metadata_filter: dict | None = None) -> str:
         norm = self.normalize_query(query)
         canon = self._canonical_filter(metadata_filter)
-        digest = hashlib.sha256(f"{norm}\x00{canon}".encode("utf-8")).hexdigest()
+        digest = hashlib.sha256(f"{norm}\x00{canon}".encode()).hexdigest()
         return f"{self._prefix}:kb{kb_version}:{digest}"
 
     async def get(
@@ -131,8 +133,9 @@ class SemanticCache:
                 "kb_version": kb_version,
                 "verified": True,
             }
-            value = json.dumps(payload, ensure_ascii=False).encode("utf-8")  # 序列化在 try 內
-            await self._redis.set(self._key(query, kb_version, metadata_filter), value, ex=self._ttl)
+            value = json.dumps(payload, ensure_ascii=False).encode()  # 序列化在 try 內
+            key = self._key(query, kb_version, metadata_filter)
+            await self._redis.set(key, value, ex=self._ttl)
         except Exception:  # noqa: BLE001  fail-open（含序列化失敗）
             logger.warning("SemanticCache.set Redis/序列化 失敗→no-op", exc_info=True)
 
