@@ -8,4 +8,4 @@ def rrf_fuse(rank_lists: list[list[UUID]], k: int = 60) -> list[tuple[UUID, floa
     for ranks in rank_lists:
         for rank, pid in enumerate(ranks):
             scores[pid] = scores.get(pid, 0.0) + 1.0 / (k + rank)
-    return sorted(scores.items(), key=lambda x: -x[1])
+    return sorted(scores.items(), key=lambda x: (-x[1], x[0]))

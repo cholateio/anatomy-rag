@@ -81,6 +81,68 @@ async def test_selfbuilt_sql_and_numpy_modes_agree(pool):
             await conn.execute("TRUNCATE books RESTART IDENTITY CASCADE")
 
 
+async def test_selfbuilt_real_timeout_degrades_and_outer_txn_survives(pool, monkeypatch):
+    """真實 server-side statement_timeout（非 Python raise）→ degrade，外層 txn 存活、
+    statement_timeout 已還原（Codex/Opus review HIGH-1 + MEDIUM-2）。"""
+    import anatomy_backend.retrieval.engine_selfbuilt as esb
+
+    async def _slow(conn, cand, tokens, kb, top_n):
+        await conn.execute("SELECT pg_sleep(2)")  # > stage_b_timeout_ms → 真 server cancel
+        return []
+
+    monkeypatch.setitem(esb._STAGE_B, "sql", _slow)
+    rng = np.random.default_rng(41)
+    page_ids = [uuid.uuid4() for _ in range(3)]
+    patches = {pid: [rng.bytes(16) for _ in range(8)] for pid in page_ids}
+    pooled = [float(x) for x in rng.standard_normal(128)]
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("TRUNCATE books RESTART IDENTITY CASCADE")
+            await _seed_three(conn, page_ids, patches, pooled)
+        qr = QueryRepr(pooled_f32=tuple(pooled),
+                       tokens_bin=tuple(patches[page_ids[0]][:6]),
+                       translated_q=None, lang="en")
+        async with hnsw_search_txn(pool, ef_search=100) as conn:
+            er = await SelfBuiltEngine("sql").retrieve(
+                conn, qr, None, kb_version=KB, top_k=100, top_n=10, stage_b_timeout_ms=300)
+            alive = await conn.fetchval("SELECT 1")  # 外層 txn 未連鎖 abort
+            st = await conn.fetchval("SELECT current_setting('statement_timeout')")
+        assert er.degraded is True
+        assert er.ranked == []
+        assert set(er.coarse_ids) == set(page_ids)
+        assert alive == 1
+        assert st == "0"  # degrade 路徑 rollback 已還原
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute(f"DROP TABLE IF EXISTS page_patches_v{KB}")
+            await conn.execute("TRUNCATE books RESTART IDENTITY CASCADE")
+
+
+async def test_selfbuilt_success_resets_statement_timeout(pool):
+    """成功路徑：Stage B 的 statement_timeout 不得洩漏到外層 txn（HIGH-1 修正）。"""
+    rng = np.random.default_rng(42)
+    page_ids = [uuid.uuid4() for _ in range(3)]
+    patches = {pid: [rng.bytes(16) for _ in range(8)] for pid in page_ids}
+    query_tokens = patches[page_ids[0]][:6]
+    pooled = [float(x) for x in rng.standard_normal(128)]
+    try:
+        async with pool.acquire() as conn:
+            await conn.execute("TRUNCATE books RESTART IDENTITY CASCADE")
+            await _seed_three(conn, page_ids, patches, pooled)
+        qr = QueryRepr(pooled_f32=tuple(pooled), tokens_bin=tuple(query_tokens),
+                       translated_q=None, lang="en")
+        async with hnsw_search_txn(pool, ef_search=100) as conn:
+            er = await SelfBuiltEngine("sql").retrieve(
+                conn, qr, None, kb_version=KB, top_k=100, top_n=10)
+            st = await conn.fetchval("SELECT current_setting('statement_timeout')")
+        assert er.degraded is False
+        assert st == "0"  # 成功路徑後 Stage B timeout 已重設，未洩漏給 BM25/metadata
+    finally:
+        async with pool.acquire() as conn:
+            await conn.execute(f"DROP TABLE IF EXISTS page_patches_v{KB}")
+            await conn.execute("TRUNCATE books RESTART IDENTITY CASCADE")
+
+
 async def test_selfbuilt_degraded_falls_back_to_stage_a(pool, monkeypatch):
     """Codex review #2：Stage B 逾時/錯誤 → savepoint 回滾、外層 txn 存活、
     回 degraded + Stage A 候選（§1.8）。以 monkeypatch 確定性模擬逾時。"""

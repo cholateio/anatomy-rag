@@ -45,15 +45,21 @@ class SelfBuiltEngine:
         try:
             # savepoint 隔離：Stage B 逾時/錯誤只回滾本子交易，外層 txn 存活
             # → BM25 / metadata fetch 仍可在同連線跑（§1.8 降級，非整請求失敗）。
-            # statement_timeout 綁住 SQL 路徑全程與 numpy 路徑的 DB fetch；numpy 的
-            # 純 Python popcount（K=100 約 1.6MB、sub-10ms）不在 PG 逾時內，benchmark 證實其快。
+            # statement_timeout 只綁 Stage B：savepoint RELEASE 會把子交易的 SET LOCAL 帶到
+            # 外層 txn，故成功路徑後立即重設為 0，避免 BM25/metadata 繼承此 ceiling。
             async with conn.transaction():
                 await conn.execute(
                     "SELECT set_config('statement_timeout', $1, true)",
-                    str(stage_b_timeout_ms))
+                    str(stage_b_timeout_ms),
+                )
                 ranked = await _STAGE_B[self.stage_b_mode](
-                    conn, coarse, list(query.tokens_bin), kb_version, top_n)
+                    conn, coarse, list(query.tokens_bin), kb_version, top_n
+                )
+            # 清除洩漏到外層 txn 的 Stage B timeout
+            await conn.execute("SET LOCAL statement_timeout = 0")
             return EngineResult(ranked=ranked, coarse_ids=coarse, degraded=False)
-        except asyncpg.PostgresError:
-            # §1.8：Stage B timeout > 1s → 退回 Stage A 排序（orchestrator 取 coarse top-N）
+        except asyncpg.QueryCanceledError:
+            # §1.8：Stage B statement_timeout 觸發 → 退回 Stage A 排序（degrade 路徑 savepoint
+            # rollback 已自動還原 statement_timeout）。只攔逾時取消，其餘 PostgresError 照常上拋
+            # （缺 operator / 缺分區 / 型別錯等真 bug 不可被誤吞成降級）。
             return EngineResult(ranked=[], coarse_ids=coarse, degraded=True)

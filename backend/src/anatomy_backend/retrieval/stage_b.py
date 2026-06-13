@@ -77,6 +77,8 @@ async def stage_b_maxsim_numpy(
     """
     if not candidate_page_ids:
         return []
+    if not query_tokens_bin:
+        return []
     # query tokens → (T, 16) uint8
     q = np.frombuffer(b"".join(query_tokens_bin), dtype=np.uint8).reshape(
         len(query_tokens_bin), 16)

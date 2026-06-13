@@ -9,7 +9,8 @@
 對 SQL 與 numpy 兩路徑各跑並發負載，回報 p50/p95/max，對預算裁決並建議預設 mode。
 生產保真（Codex review #1）：Stage B 在 hnsw_search_txn + savepoint 內跑（pin 連線同生產），
 latency 含 pool.acquire/queue 等待，pool 為生產級固定大小（< concurrency → acquire 排隊，
-反映 numpy 占用連線做 Python compute 的爭用代價）；SQL/numpy 各自獨立 warmup。
+反映 numpy 占用連線做 Python compute 的爭用代價）；各路徑先 warmup 再量測
+（兩路徑共用 PG/OS buffer，無法完全隔離 cache）。
 以 kb_version=998 建合成資料（跑完清除）；所有連線經 PgBouncer :6432。
 單連線探針見 bench_stage_b.py（DL-013）。
 """
@@ -108,25 +109,33 @@ async def main():
     pool = await asyncpg.create_pool(
         os.environ["DATABASE_URL"], statement_cache_size=0,
         min_size=args.pool_size, max_size=args.pool_size)
-    seed_conn = await pool.acquire()
-    leftover = await seed_conn.fetchval(
-        "SELECT count(*) FROM pages WHERE kb_version = $1", BENCH_KB)
-    if leftover:
-        await pool.release(seed_conn)
-        await pool.close()
-        print(f"錯誤：殘留 bench 資料（kb_version={BENCH_KB}：{leftover} 列），請先清理")
-        sys.exit(1)
 
-    book_id = None
+    # leftover チェック：seed_conn を try/finally で必ず解放
+    seed_conn = await pool.acquire()
     try:
+        leftover = await seed_conn.fetchval(
+            "SELECT count(*) FROM pages WHERE kb_version = $1", BENCH_KB)
+        if leftover:
+            print(f"錯誤：殘留 bench 資料（kb_version={BENCH_KB}：{leftover} 列），請先清理")
+            await pool.release(seed_conn)
+            await pool.close()
+            sys.exit(1)
+
+        book_id = None
         print(f"seeding {args.pages} pages × {PATCHES_PER_PAGE}（首次約數分鐘）…")
         book_id, page_ids = await seed(seed_conn, args.pages)
-        await pool.release(seed_conn)
-        seed_conn = None
+    finally:
+        # seed 成功後も失敗後も seed_conn を返却（二重解放防止）
+        if seed_conn is not None:
+            await pool.release(seed_conn)
+            seed_conn = None
+
+    try:
         n_cand = min(args.candidates, len(page_ids))
         rng = np.random.default_rng(1)
 
-        # 各路徑「獨立 warmup → 量測」（Codex review #1：避免 SQL 先暖了 numpy 的資料而失真）
+        # 各路徑先 warmup 再量測（注意：兩路徑共用 PG/OS buffer，無法完全隔離 cache；
+        # 偏差利於較慢的 numpy，不影響 SQL 勝出結論）
         await _run_path(pool, stage_b_maxsim, page_ids, n_cand, args.concurrency,
                         args.concurrency, rng)
         sql = await _run_path(pool, stage_b_maxsim, page_ids, n_cand, args.iters,
@@ -151,10 +160,11 @@ async def main():
         print(f"GATE PASS：建議 production stage_b_mode='{recommend}'")
     finally:
         print("cleaning up…")
-        c = await pool.acquire()
-        if book_id is not None:
-            await cleanup(c, book_id)
-        await pool.release(c)
+        async with pool.acquire() as c:
+            await c.execute(f"DROP TABLE IF EXISTS page_patches_v{BENCH_KB}")
+            await c.execute("DELETE FROM pages WHERE kb_version = $1", BENCH_KB)
+            if book_id is not None:
+                await c.execute("DELETE FROM books WHERE book_id = $1", book_id)
         await pool.close()
 
 
