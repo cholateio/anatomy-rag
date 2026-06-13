@@ -73,6 +73,7 @@ def assert_no_identifiers(messages: list[dict], forbidden: frozenset[str]) -> No
     if not forbidden:
         return
     blob = json.dumps(messages, ensure_ascii=False)
+    # 掃描為區分大小寫的子字串比對（defense-in-depth；Phase 8 caller 傳入確切識別字串）
     leaked = [s for s in forbidden if s and s in blob]
     if leaked:
         raise PIILeakError(
@@ -126,9 +127,12 @@ class LLMClient:
             TOKEN_LIMIT_PARAM: self._max_completion_tokens,
         }
         stream = await self._client.chat.completions.create(**kwargs)
-        async for chunk in stream:
-            if not chunk.choices:  # usage-only chunk
-                continue
-            delta = chunk.choices[0].delta
-            if delta.content:  # 首尾 chunk content 為 None
-                yield delta.content
+        try:
+            async for chunk in stream:
+                if not chunk.choices:  # usage-only chunk
+                    continue
+                delta = chunk.choices[0].delta
+                if delta.content:  # 首尾 chunk content 為 None
+                    yield delta.content
+        finally:
+            await stream.close()

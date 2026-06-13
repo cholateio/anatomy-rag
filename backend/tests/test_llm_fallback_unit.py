@@ -151,3 +151,32 @@ async def test_mid_stream_error_after_first_token_not_counted():
     with pytest.raises(InternalServerError):
         await _drain(mfc)
     assert mfc.consecutive_errors == 0  # 已建立成功 → 不計建立期失敗
+
+
+async def test_empty_stream_returns_nothing():
+    # Fix 2a：primary 回傳空串流 → drain 回傳 []，不計錯誤，不例外
+    primary = MockLLMClient(tokens=[])
+    fallback = MockLLMClient(tokens=["備援"])
+    mfc = _mfc(primary, fallback)
+    out = await _drain(mfc)
+    assert out == []
+    assert mfc.consecutive_errors == 0
+
+
+async def test_forwards_image_detail_and_forbidden_identifiers():
+    # Fix 2b：stream_complete 的 image_detail / forbidden_identifiers 透傳給底層 client
+    primary = MockLLMClient(tokens=["x"])
+    fallback = MockLLMClient(tokens=["備援"])
+    mfc = _mfc(primary, fallback)
+    _ = [
+        t
+        async for t in mfc.stream_complete(
+            "S",
+            "U",
+            images=[b"i"],
+            image_detail="low",
+            forbidden_identifiers=frozenset({"uid"}),
+        )
+    ]
+    assert primary.calls[0].image_detail == "low"
+    assert primary.calls[0].forbidden_identifiers == frozenset({"uid"})

@@ -20,6 +20,7 @@ def _usage_chunk():
 class _FakeStream:
     def __init__(self, chunks):
         self._chunks = chunks
+        self.closed = False
 
     def __aiter__(self):
         return self._agen()
@@ -27,6 +28,9 @@ class _FakeStream:
     async def _agen(self):
         for c in self._chunks:
             yield c
+
+    async def close(self):
+        self.closed = True
 
 
 class _FakeCompletions:
@@ -37,7 +41,9 @@ class _FakeCompletions:
     async def create(self, **kwargs):
         self._rec["kwargs"] = kwargs
         self._rec["create_calls"] = self._rec.get("create_calls", 0) + 1
-        return _FakeStream(self._chunks)
+        s = _FakeStream(self._chunks)
+        self._rec["stream"] = s
+        return s
 
 
 class _FakeClient:
@@ -92,3 +98,12 @@ async def test_pii_guard_blocks_create_when_identifier_present():
             )
         ]
     assert rec.get("create_calls", 0) == 0  # 送出前即攔下
+
+
+async def test_stream_is_closed_after_consumption():
+    # Fix 1c：正常消費完畢後底層串流應被 close()（防止 httpx 連線洩漏）
+    rec = {}
+    fake_client = _FakeClient([_chunk("x")], rec)
+    client = LLMClient("gpt-5.5", client=fake_client)
+    _ = [t async for t in client.stream_complete("S", "U", images=[])]
+    assert rec["stream"].closed is True

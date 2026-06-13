@@ -116,7 +116,10 @@ class ModelFallbackClient:
                 continue  # 此次嘗試失敗（例外已被 tenacity 吞；下一 iteration 重試）
             if first is _EMPTY:
                 return
-            yield first
-            async for tok in agen:  # 中途斷會傳播、不重試、不計數
-                yield tok
+            try:
+                yield first
+                async for tok in agen:  # 中途斷會傳播、不重試、不計數
+                    yield tok
+            finally:
+                await agen.aclose()
             return
