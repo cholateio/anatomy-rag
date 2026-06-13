@@ -9,7 +9,6 @@ import os
 import uuid
 
 import pytest
-
 from anatomy_backend.cache.semantic_cache import SemanticCache
 
 pytestmark = [
@@ -58,7 +57,8 @@ async def test_real_redis_cross_kb_miss(cache):
 
 
 async def test_real_redis_cross_metadata_filter_miss(cache):
-    await cache.set("q", "musc", SRC, 1, verified=True, metadata_filter={"anatomy_system": "musculoskeletal"})
+    mf = {"anatomy_system": "musculoskeletal"}
+    await cache.set("q", "musc", SRC, 1, verified=True, metadata_filter=mf)
     assert await cache.get("q", 1, {"anatomy_system": "nervous"}) is None
     assert await cache.get("q", 1, None) is None
     hit = await cache.get("q", 1, {"anatomy_system": "musculoskeletal"})

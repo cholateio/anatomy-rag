@@ -354,6 +354,8 @@ async def test_chat_threads_metadata_filter_into_cache():
             pass
 
     assert cache.get_args, "cache.get 應被呼叫"
-    assert cache.get_args[0][2] == mf, f"cache.get 的 metadata_filter 應為 {mf}，實得 {cache.get_args[0][2]}"
+    got_get = cache.get_args[0][2]
+    assert got_get == mf, f"cache.get metadata_filter 應為 {mf}，實得 {got_get}"
     assert cache.set_args, "cache.set 應被呼叫（需 status=ok + all_grounded=True）"
-    assert cache.set_args[0][3] == mf, f"cache.set 的 metadata_filter 應為 {mf}，實得 {cache.set_args[0][3]}"
+    got_set = cache.set_args[0][3]
+    assert got_set == mf, f"cache.set metadata_filter 應為 {mf}，實得 {got_set}"
