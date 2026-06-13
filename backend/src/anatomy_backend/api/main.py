@@ -94,27 +94,17 @@ async def lifespan(app: FastAPI):
             return b""
 
     else:
-        import boto3  # type: ignore[import-untyped]
-        import httpx as _httpx
-
-        s3 = boto3.client(
-            "s3",
-            endpoint_url=settings.s3_endpoint,
-        )
-        # 單一共用 client（Fix 4: 避免每次 fetch_bytes 開新連線）
-        _shared_http = _httpx.AsyncClient()
-
+        # 真實 S3/MinIO 取頁圖尚未接線（Phase 8 為 mock-first）。
+        # 接線需後端新增依賴 boto3 + S3 憑證（S3_ACCESS_KEY/S3_SECRET_KEY）；待核可後實作。
         def sign_url(uri: str) -> str:
-            bucket, key = uri.replace("s3://", "", 1).split("/", 1)
-            return s3.generate_presigned_url(
-                "get_object", Params={"Bucket": bucket, "Key": key}, ExpiresIn=3600
-            )
+            raise NotImplementedError(
+                "真實物件儲存未接線：需後端 boto3 依賴 + S3 憑證（見 Phase 8 後續/部署）")
 
         async def fetch_bytes(uri: str) -> bytes:
-            signed = sign_url(uri)
-            r = await _shared_http.get(signed)
-            r.raise_for_status()
-            return r.content
+            raise NotImplementedError(
+                "真實物件儲存未接線：需後端 boto3 依賴 + S3 憑證（見 Phase 8 後續/部署）")
+
+        _shared_http = None
 
     # ── DB write helpers ───────────────────────────────────────────────────
     async def _log_query(*, user_id, query, conversation_id=None, cache_hit=False,

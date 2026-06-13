@@ -82,6 +82,9 @@ async def chat_event_stream(
     LLM 錯誤（[F8/M]）：
       start → data-sources → text-start → (deltas) → error → text-end → [DONE]
       （無 verification / finish）
+    encoder/retrieval 失敗（P1c）：
+      start → error → [DONE]
+      （無 sources / verification / finish）
     """
     kb = deps.kb_version
 
@@ -115,21 +118,54 @@ async def chat_event_stream(
         else normalized.query
     )
 
-    # ── Steps 3/4：encode + 檢索（連線於 retrieve_fn 內歸還，不跨串流 DL-012）
-    query_repr = await deps.encoder.encode_query(retrieval_q)
-    results = await deps.retrieve_fn(
-        retrieval_q, query_repr, normalized.metadata_filter, kb, deps.top_n
-    )
+    # ── Step 6a：start 提前（失敗路徑也需送合規 SSE 錯誤事件，emit once here）──
+    yield ais.sse_event(ais.start_part())
 
-    # ── Step 5：[F5/H] 條件式附圖 + 建引文（async fetch_bytes，串流前完成）──
-    routing = route_images(results, _intent(normalized))
-    citations, images = await build_citations_and_images(
-        results, routing, sign_url=deps.sign_url, fetch_bytes=deps.fetch_bytes
-    )
+    # ── Step 3：encode（失敗→ encoder_error 短路，DL-012）──────────────────
+    try:
+        query_repr = await deps.encoder.encode_query(retrieval_q)
+    except Exception:  # noqa: BLE001
+        logger.exception("encode_query 失敗")
+        yield ais.sse_event({"type": "error", "errorText": "服務暫時無法使用，請稍後再試"})
+        yield ais.done_event()
+        deps.spawn(
+            deps.log_query(
+                user_id=user.user_id,
+                query=normalized.query,
+                conversation_id=normalized.conversation_id,
+                cache_hit=False,
+                status="encoder_error",
+            )
+        )
+        return
+
+    # ── Steps 4/5：檢索 + 建引文（失敗→ retrieval_error 短路；連線於 retrieve_fn 內歸還）
+    try:
+        results = await deps.retrieve_fn(
+            retrieval_q, query_repr, normalized.metadata_filter, kb, deps.top_n
+        )
+        routing = route_images(results, _intent(normalized))
+        citations, images = await build_citations_and_images(
+            results, routing, sign_url=deps.sign_url, fetch_bytes=deps.fetch_bytes
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("檢索或引文建立失敗")
+        yield ais.sse_event({"type": "error", "errorText": "服務暫時無法使用，請稍後再試"})
+        yield ais.done_event()
+        deps.spawn(
+            deps.log_query(
+                user_id=user.user_id,
+                query=normalized.query,
+                conversation_id=normalized.conversation_id,
+                cache_hit=False,
+                status="retrieval_error",
+            )
+        )
+        return
+
     sources_payload = [c.model_dump() for c in citations]
 
-    # ── Step 6：start + sources（MUST 在第一個 text-delta 前）────────────────
-    yield ais.sse_event(ais.start_part())
+    # ── Step 6b：sources（MUST 在第一個 text-delta 前）────────────────────
     yield ais.sse_event(ais.data_part("sources", {"sources": sources_payload}))
 
     # ── Step 7：串流 LLM（user_id 入 forbidden_identifiers；連線此時已歸還）──

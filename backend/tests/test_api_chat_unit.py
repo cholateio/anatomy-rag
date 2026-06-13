@@ -390,6 +390,84 @@ async def test_f8_llm_stream_error_emits_error_no_finish_ends_with_done():
     assert logs and logs[-1]["status"] == "llm_error"
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# [P1c] encoder/retrieval 串流內失敗契約
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+async def test_encoder_error_emits_error_no_finish_ends_with_done():
+    """encode_query 拋例外 → error 事件、無 finish、[DONE] 收尾、log status=encoder_error。"""
+
+    class _BoomEncoder:
+        async def encode_query(self, text: str):
+            raise RuntimeError("encoder boom")
+
+    logs: list = []
+    collected: list = []
+
+    async def _log(**kw):
+        logs.append(kw)
+
+    deps = ChatDeps(
+        encoder=_BoomEncoder(),
+        llm=MockLLMClient(tokens=["x"]),
+        cache=NoOpCache(),
+        retrieve_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not reach")),
+        sign_url=lambda u: f"https://signed/{u}",
+        fetch_bytes=_fetch_bytes,
+        log_query=_log,
+        spawn=lambda coro: collected.append(coro),
+        kb_version=1,
+        is_disconnected=_never_disconnected,
+    )
+    parts = _json_parts(
+        await _collect(chat_event_stream(deps, _norm(), User("u1", False)))
+    )
+    await asyncio.gather(*collected)
+
+    types = [p if p == "[DONE]" else p.get("type") for p in parts]
+    assert "error" in types
+    assert "finish" not in types
+    assert parts[-1] == "[DONE]"
+    assert logs and logs[-1]["status"] == "encoder_error"
+
+
+async def test_retrieval_error_emits_error_no_finish_ends_with_done():
+    """retrieve_fn 拋例外 → error 事件、無 finish、[DONE] 收尾、log status=retrieval_error。"""
+
+    async def _boom_retrieve(query, query_repr, metadata_filter, kb_version, top_n):
+        raise RuntimeError("retrieval boom")
+
+    logs: list = []
+    collected: list = []
+
+    async def _log(**kw):
+        logs.append(kw)
+
+    deps = ChatDeps(
+        encoder=MockEncoderClient(),
+        llm=MockLLMClient(tokens=["x"]),
+        cache=NoOpCache(),
+        retrieve_fn=_boom_retrieve,
+        sign_url=lambda u: f"https://signed/{u}",
+        fetch_bytes=_fetch_bytes,
+        log_query=_log,
+        spawn=lambda coro: collected.append(coro),
+        kb_version=1,
+        is_disconnected=_never_disconnected,
+    )
+    parts = _json_parts(
+        await _collect(chat_event_stream(deps, _norm(), User("u1", False)))
+    )
+    await asyncio.gather(*collected)
+
+    types = [p if p == "[DONE]" else p.get("type") for p in parts]
+    assert "error" in types
+    assert "finish" not in types
+    assert parts[-1] == "[DONE]"
+    assert logs and logs[-1]["status"] == "retrieval_error"
+
+
 # ── Fix 1: DB 合法 status 常數與 chat.py emit 一致性 ─────────────────────────
 
 

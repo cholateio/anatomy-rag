@@ -59,6 +59,8 @@ def _is_followup(query: str, prev_query: str | None) -> bool:
 
 def normalize_chat(body: dict) -> NormalizedChat:
     """正規化 useChat 請求並驗證輸入（F6/M §5.7）。"""
+    if not isinstance(body, dict):
+        raise ValueError("請求 body 必須為物件")
     messages = body.get("messages") or []
     user_texts = [_text_of(m) for m in messages if m.get("role") == "user"]
     user_texts = [t for t in user_texts if t]

@@ -134,3 +134,17 @@ def test_none_metadata_filter_is_ok():
     body = {"messages": [_msg("user", "q")], "metadata_filter": None}
     n = normalize_chat(body)
     assert n.metadata_filter is None
+
+
+# ── Fix B: non-object JSON body → ValueError (not AttributeError) ────────────
+
+def test_list_body_raises_value_error():
+    """normalize_chat([]) MUST raise ValueError, not AttributeError (Fix B)."""
+    with pytest.raises(ValueError, match="物件"):
+        normalize_chat([])
+
+
+def test_string_body_raises_value_error():
+    """normalize_chat('x') MUST raise ValueError, not AttributeError (Fix B)."""
+    with pytest.raises(ValueError, match="物件"):
+        normalize_chat("x")
