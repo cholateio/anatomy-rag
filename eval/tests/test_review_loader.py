@@ -103,3 +103,105 @@ def test_export_annotations_creates_parent_dir(tmp_path: Path):
     out = tmp_path / "sub" / "nested" / "out.jsonl"
     export_annotations([{"label": "correct", "comment": ""}], out)
     assert out.exists()
+
+
+# ── to_golden_row (H-1) ──────────────────────────────────────────────────────
+
+
+def test_to_golden_row_projects_away_log_fields():
+    """to_golden_row 丟棄 label/comment/answer/sources 等日誌欄位（H-1）。"""
+    from anatomy_eval.review_loader import to_golden_row
+
+    annotation = {
+        "id": "log-001",
+        "category": "text_only",
+        "query": "What is anatomy?",
+        "expected_pages": ["gray42:1"],
+        "answer": "Some LLM answer",
+        "sources": ["page1", "page2"],
+        "label": "wrong",
+        "comment": "incorrect answer",
+        "clinical_flavored": True,
+    }
+    result = to_golden_row(annotation)
+    # Golden schema fields preserved
+    assert result["id"] == "log-001"
+    assert result["category"] == "text_only"
+    assert result["query"] == "What is anatomy?"
+    assert result["expected_pages"] == ["gray42:1"]
+    # Log-only fields dropped
+    assert "answer" not in result
+    assert "sources" not in result
+    assert "label" not in result
+    assert "comment" not in result
+    assert "clinical_flavored" not in result
+    # Only golden schema fields present
+    golden_fields = {"id", "category", "query", "expected_pages", "expected_concepts",
+                     "metadata_filter", "expected_response_type"}
+    assert set(result.keys()) <= golden_fields
+
+
+def test_to_golden_row_result_passes_parse_golden_row():
+    """to_golden_row 投影後的 dict 能通過 parse_golden_row 驗證（H-1 核心契約）。"""
+    from anatomy_eval.golden import parse_golden_row
+    from anatomy_eval.review_loader import to_golden_row
+
+    annotation = {
+        "id": "log-002",
+        "category": "text_only",
+        "query": "肱二頭肌起止點？",
+        "expected_pages": ["gray42:1"],
+        "answer": "Some answer",
+        "label": "wrong",
+        "comment": "needs improvement",
+        "extra_field": "should be dropped",
+    }
+    projected = to_golden_row(annotation)
+    qa = parse_golden_row(projected, 0)  # 未通過則 raise ValueError
+    assert qa.id == "log-002"
+    assert qa.category == "text_only"
+    assert qa.query == "肱二頭肌起止點？"
+
+
+def test_to_golden_row_missing_id_raises():
+    """缺 id 時 raise ValueError（H-1：讓 review_tool 顯示明確錯誤）。"""
+    from anatomy_eval.review_loader import to_golden_row
+
+    with pytest.raises(ValueError, match="id"):
+        to_golden_row({
+            "category": "text_only",
+            "query": "What is anatomy?",
+            "expected_pages": ["gray42:1"],
+            "label": "wrong",
+        })
+
+
+def test_to_golden_row_missing_category_raises():
+    """缺 category 時 raise ValueError。"""
+    from anatomy_eval.review_loader import to_golden_row
+
+    with pytest.raises(ValueError, match="category"):
+        to_golden_row({
+            "id": "x1",
+            "query": "What is anatomy?",
+            "label": "wrong",
+        })
+
+
+def test_to_golden_row_oos_annotation():
+    """OOS 標注（無 expected_pages）也能正確投影；完整驗證交給 parse_golden_row。"""
+    from anatomy_eval.review_loader import to_golden_row
+
+    annotation = {
+        "id": "oos-001",
+        "category": "out_of_scope",
+        "query": "今天天氣如何？",
+        "expected_response_type": "教材中查無此項",
+        "answer": "教材中查無此項",
+        "label": "wrong",
+        "comment": "",
+    }
+    result = to_golden_row(annotation)
+    assert result["expected_response_type"] == "教材中查無此項"
+    assert "answer" not in result
+    assert "label" not in result

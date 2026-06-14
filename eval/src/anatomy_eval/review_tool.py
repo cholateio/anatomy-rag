@@ -22,7 +22,7 @@ from pathlib import Path
 import streamlit as st
 
 from anatomy_eval.regression import promote_cases
-from anatomy_eval.review_loader import VALID_LABELS, export_annotations, sample_logs
+from anatomy_eval.review_loader import VALID_LABELS, export_annotations, sample_logs, to_golden_row
 
 # ── §7.4 流程說明 ────────────────────────────────────────────────────────────
 _FLOW_NOTE = """
@@ -144,7 +144,10 @@ def main() -> None:
                 st.info("目前沒有標注為「錯誤」的案例。")
             else:
                 try:
-                    added = promote_cases(wrong_cases, regression_path)
+                    # H-1: 先投影至黃金 schema，去除 label/comment/answer/sources
+                    # 等日誌欄位，避免 parse_golden_row 因「未知欄位」raise。
+                    golden_cases = [to_golden_row(a) for a in wrong_cases]
+                    added = promote_cases(golden_cases, regression_path)
                     st.success(f"已促進 {added} 筆案例至 {regression_path}")
                 except ValueError as exc:
                     st.error(f"促進失敗（schema 驗證未通過）：{exc}")
