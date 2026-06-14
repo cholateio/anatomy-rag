@@ -56,7 +56,7 @@ def test_scrub_allowlist_drops_all_free_text_and_identifiers():
     # 自由文字/識別性容器整塊丟棄
     for dropped in ("user", "tags", "extra", "breadcrumbs", "request", "message", "logentry"):
         assert dropped not in out
-    # contexts：core trace id 保留；自由文字子欄位(description)/識別(user_id)/未核准型別(device/custom) 皆去除
+    # contexts：core trace id 保留；自由文字/識別(user_id)/未核准型別(device/custom) 皆去除
     assert out["contexts"]["trace"]["trace_id"] == "abc"
     assert "description" not in out["contexts"]["trace"]
     assert "user_id" not in out["contexts"]["trace"]

@@ -1,9 +1,9 @@
 """Phase 9 tracing 單元測試（NoOp/Langfuse/build_tracer；零外部呼叫）。"""
 from __future__ import annotations
 
-import pytest
 from contextlib import contextmanager
 
+import pytest
 from anatomy_backend.config import Settings
 from anatomy_backend.observability.tracing import (
     LangfuseTracer,

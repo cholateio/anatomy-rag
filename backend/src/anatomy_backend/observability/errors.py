@@ -39,7 +39,7 @@ _ALLOWED_TOP_KEYS = frozenset({
     "event_id", "timestamp", "level", "platform", "logger",
     "sdk", "release", "environment", "server_name", "transaction", "modules",
 })
-# contexts 只留這些型別的這些子欄位（device 整個丟棄；trace.description 等自由文字不在內，Codex#critical v3）
+# contexts 只留核准型別的核准子欄位（device 整個丟棄；trace.description 等自由文字去除）
 _ALLOWED_CONTEXT_FIELDS = {
     "runtime": frozenset({"name", "version", "build"}),
     "os": frozenset({"name", "version", "build", "kernel_version"}),
@@ -109,7 +109,7 @@ def init_sentry(settings) -> bool:
             before_send=scrub_event,
             send_default_pii=False,
             max_request_body_size="never",
-            include_local_variables=False,   # 不捕捉 frame 區域變數（防 query/user_text 入 stacktrace）
+            include_local_variables=False,   # 不捕捉 frame 區域變數（防 query/user_text 洩漏）
             traces_sample_rate=0.0,          # 只收錯誤，trace 由 LangFuse 負責
         )
         return True

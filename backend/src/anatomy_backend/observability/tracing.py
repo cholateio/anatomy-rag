@@ -96,7 +96,7 @@ class NoOpTracer:
         return None
 
 
-# trace metadata 只允許這些 key（Codex#4 v2）；且 value 必須是 primitive 或短 enum（Codex#high v3）。
+# trace metadata 只允許這些 key（Codex#4 v2）；value 限 primitive 或短 enum（Codex#high v3）。
 _ALLOWED_METADATA_KEYS = frozenset({"is_followup", "kb_version", "status", "cache_hit", "lang"})
 # score name 固定 allowlist（Codex#high v3）；comment 一律不外送（防自由文字）。
 _ALLOWED_SCORE_NAMES = frozenset({"cache_hit", "citation_verified", "latency_ms", "status_ok"})
@@ -112,7 +112,7 @@ def _safe_metadata_value(v) -> bool:
 
 class LangfuseTracer:
     """包 LangFuse v4 client（OTel）。trace/span 經 _safe_cm fail-open；
-    只收假名化 user_id（D-M）+ metadata key/value allowlist + score name allowlist；score/flush fail-open。"""
+    只收假名化 user_id（D-M）+ metadata/score name allowlist；score/flush fail-open。"""
 
     def __init__(self, client, *, id_salt: str = "") -> None:
         self._lf = client

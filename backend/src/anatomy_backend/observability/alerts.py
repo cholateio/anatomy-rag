@@ -30,7 +30,8 @@ def evaluate_alerts(metrics: dict) -> list[Alert]:
                          ("slack", "email")))
     if metrics.get("usage_ratio", 0) >= 0.80:
         out.append(Alert("usage_ratio", "must", "RPM/TPM 用量達 80%", ("slack",)))
-    if metrics.get("citation_fail_rate", 0) > 0.10 and metrics.get("citation_fail_minutes", 0) >= 30:
+    if (metrics.get("citation_fail_rate", 0) > 0.10
+            and metrics.get("citation_fail_minutes", 0) >= 30):
         out.append(Alert("citation_fail_rate", "should", "引文驗證失敗率 > 10% 連續 ≥30 分鐘",
                          ("slack",)))
     return out
