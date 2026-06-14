@@ -42,6 +42,18 @@ export function useStickToBottom() {
     setShowJumpToLatest(false);
   }, []);
 
+  /**
+   * Belt-and-suspenders explicit scroll.
+   * Call this in a `useEffect` keyed on content changes (e.g. messages.length +
+   * last-message text length) to cover streaming token appends where
+   * ResizeObserver fires late or is not available (e.g. jsdom test env).
+   */
+  const scrollToBottomIfStuck = useCallback(() => {
+    const el = containerRef.current;
+    if (!el || !isStuck.current) return;
+    el.scrollTop = el.scrollHeight - el.clientHeight;
+  }, []);
+
   // Scroll event → decide whether to show the FAB
   useEffect(() => {
     const el = containerRef.current;
@@ -76,5 +88,5 @@ export function useStickToBottom() {
     return () => ro.disconnect();
   }, []);
 
-  return { containerRef, innerRef, showJumpToLatest, jumpToLatest };
+  return { containerRef, innerRef, showJumpToLatest, jumpToLatest, scrollToBottomIfStuck };
 }

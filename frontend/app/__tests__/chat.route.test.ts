@@ -83,4 +83,20 @@ describe("POST /chat route handler (H3)", () => {
       expect.anything(),
     );
   });
+
+  it("returns 502 when upstream fetch rejects (ECONNREFUSED / unreachable)", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ECONNREFUSED")));
+
+    const { POST } = await import("@/app/chat/route");
+    const req = new Request("http://localhost/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+
+    const res = await POST(req);
+
+    expect(res.status).toBe(502);
+    expect(await res.text()).toContain("上游服務暫時無法使用");
+  });
 });
