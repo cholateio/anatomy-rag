@@ -23,11 +23,11 @@ from anatomy_backend.api.auth import User, get_current_user
 from anatomy_backend.api.citations import build_citations_and_images, verify_citations
 from anatomy_backend.api.schemas import NormalizedChat, normalize_chat
 from anatomy_backend.cache import CacheProtocol
-from anatomy_backend.observability.tracing import NoOpTracer, Tracer
 from anatomy_backend.encoder.client import EncoderClientProtocol
 from anatomy_backend.llm.client import LLMClientProtocol
 from anatomy_backend.llm.image_routing import QueryIntent, route_images
 from anatomy_backend.llm.prompts import build_user_text, get_system_prompt
+from anatomy_backend.observability.tracing import NoOpTracer, Tracer
 from anatomy_backend.retrieval.types import RetrievalResult
 
 logger = logging.getLogger(__name__)
@@ -258,10 +258,10 @@ async def chat_event_stream(
             )
         )
         # [F2/H] cache.set 僅在非追問 + ok + all_grounded（防快取偽造引文答案）
-        # 已知限制（Codex 終審 P2#1，待真實 S3 接線處理）：sources_payload.image_url 為 sign_url 產物。
-        # 真實 presigned S3 URL 會過期，而快取 TTL 達 14 天，命中可能回到已過期的圖片 URL。真實 S3 接線
-        # 時 MUST 改存穩定 page_image_uri 並於命中時重簽（或令 cache TTL ≤ presign 壽命）。目前 mock
-        # 的 sign_url 不過期、真實模式尚 raise NotImplementedError（S3 延後），故此路徑現無實際影響。
+        # 已知限制（Codex 終審 P2#1，待真實 S3 接線）：image_url 為 sign_url 產物；
+        # presigned URL 會過期而 cache TTL 達 14 天，命中可能回到已過期圖片 URL。
+        # 接線時 MUST 改存穩定 page_image_uri 並於命中時重簽（或令 TTL ≤ presign 壽命）。
+        # 目前 mock sign_url 不過期、真實模式尚 NotImplementedError，故暫無影響。
         if (not normalized.is_followup) and status == "ok" and verification.all_grounded:
             deps.spawn(
                 deps.cache.set(

@@ -37,7 +37,7 @@ _BG: set = set()
 
 
 def _spawn(coro) -> None:
-    """production spawn：create_task（乾淨 context，防 OTel span 等 contextvar 洩漏）+ 保留參考 + 記錯。"""
+    """production spawn：乾淨 context + 保留參考 + 記錯（防 OTel span 等 contextvar 洩漏）。"""
     t = asyncio.create_task(coro, context=contextvars.Context())
     _BG.add(t)
 

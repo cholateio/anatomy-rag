@@ -421,7 +421,7 @@ async def test_chat_records_trace_spans_and_citation_score():
 
 
 async def test_spawn_isolates_contextvars():
-    """production _spawn 用乾淨 contextvars.Context()，背景任務不繼承呼叫端 contextvar（防 OTel span 洩漏）。"""
+    """_spawn 用乾淨 contextvars.Context()，背景任務不繼承呼叫端 contextvar。"""
     import asyncio
     import contextvars
 
