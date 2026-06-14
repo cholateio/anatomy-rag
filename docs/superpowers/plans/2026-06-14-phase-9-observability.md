@@ -1,4 +1,4 @@
-# Phase 9 — 觀測性（trace + Sentry 脫敏 + 告警）實作計畫 v2
+# Phase 9 — 觀測性（trace + Sentry 脫敏 + 告警）實作計畫 v3
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -21,14 +21,23 @@ v1 verdict＝needs-attention / no-ship（1 critical + 5 high）：
 5. **[high] build_tracer/init_sentry 初始化未 fail-open→可能擋啟動** → import + `Langfuse(...)` + `sentry_sdk.init` 全包 try/except→NoOp/False。加建構拋錯測試。
 6. **[high] §7.5 MUST 告警無 metrics 來源/排程/通知路徑→永不觸發** → **誠實降級**：本 phase 只交付告警**條件邏輯 + 介面**；metrics 聚合、時間窗排程、真實通知管道（Slack/email）**明示延後 ops**（DL-011 Prometheus 延後）。移除「§7.5 MUST 已滿足」宣稱。
 
+### Codex 對抗式覆審（v2）修訂摘要——本 v3 再處置（context 隔離/告警降級已獲認可）
+
+1. **[critical] scrubber 仍是 key denylist→`user.id`/`tags`/未知 `contexts` 自由文字外送** → 改 **結構 allowlist**（只保留核准頂層 + 例外 type/stacktrace + 核准 contexts 型別，其餘整塊丟棄）。注入 `user.id`/`tags.note`/`contexts.custom` 測試。
+2. **[high] 空 salt→假名可字典反查** → `_pseudonymize` 改 **HMAC-SHA256（128 bits）**；`build_tracer` **缺 salt 不啟用 LangFuse**。
+3. **[high] `_safe_cm` enter 回滾 `stack.close()` 未保護** → 回滾 close 也包 try/except；加「部分 enter 成功 + 後續 enter 與回滾 exit 雙失敗」測試。
+4. **[high] tracer metadata 邊界放任原始 query/user_id** → `LangfuseTracer` 內 **metadata allowlist**；加 query/user_id 拒送測試。
+5. **[medium] 同步 flush 無 timeout→可卡 shutdown** → `flush_tracer` 用 `to_thread + wait_for(timeout)`；加阻塞 flush 有界返回測試。
+
 ---
 
 ## 範圍護欄（隱私為硬紅線；交 Codex 對抗式審查）
 
 - **fail-open / no-op**：無 LangFuse 金鑰→`NoOpTracer`；無 Sentry DSN→`init_sentry` no-op；**SDK import/建構/init 失敗→NoOp/False（不擋啟動）**；tracer/score/flush 任一例外**絕不**中斷 `/chat`。
 - **隱私（D-M / §0.3 / §5.8）**：
-  - Sentry `before_send` **default-deny**：移除 exception value/frame vars/message/logentry/breadcrumbs/request 自由文字/extra；`send_default_pii=False`、`max_request_body_size="never"`、`include_local_variables=False`；脫敏出錯或非預期結構→**回 None 丟棄**。
-  - LangFuse **只收假名化 user_id**（hash），**MUST NOT** 收原始 user_id/學號/query/檢索內容。
+  - Sentry `before_send` **結構 allowlist**：只保留核准頂層欄位 + 例外 type/stacktrace 結構 + 核准 contexts 型別；`user`/`tags`/`extra`/`breadcrumbs`/`request`/`message`/`logentry`/未知頂層**整塊丟棄**；`send_default_pii=False`、`max_request_body_size="never"`、`include_local_variables=False`；非 dict/出錯→**回 None 丟棄**。
+  - LangFuse **只收假名化 user_id**（**HMAC-SHA256 + 必填高熵 salt**，缺 salt 則不啟用）+ **metadata allowlist**；**MUST NOT** 收原始 user_id/學號/query/檢索內容。
+  - shutdown flush **有界**（`to_thread` + `wait_for` timeout），不卡事件迴圈/容器終止。
 - **user_id**：假名化後入 trace（§6.5「可追蹤」），原始值**MUST NOT** 進 LLM payload（既有 `forbidden_identifiers`）亦不進 trace。
 - **不改回傳/不改 SSE**：span context manager 純記錄；`_safe_cm` 不二次 yield、不吞業務例外；`ChatDeps.tracer` 預設 NoOp→既有 golden 位元組不變。
 - **背景任務 context 隔離**：`_spawn` 用乾淨 `contextvars.Context()`，detached log/cache 任務不繼承 span。
@@ -113,6 +122,7 @@ trace/span 為 context manager，純計時/記錄、不改 wrapped 回傳值；f
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, ExitStack, contextmanager
@@ -121,11 +131,12 @@ from typing import Protocol
 logger = logging.getLogger(__name__)
 
 
-def _pseudonymize(user_id: str | None, salt: str = "") -> str | None:
-    """假名化：sha256(salt+user_id) 前 16 hex；None→None。可追蹤但不可逆、非原始識別碼。"""
-    if not user_id:
+def _pseudonymize(user_id: str | None, salt: str) -> str | None:
+    """假名化：HMAC-SHA256(key=salt, msg=user_id) 前 32 hex(128 bits)；None/空 salt→None。
+    HMAC + 高熵 salt 防低熵 ID 字典反查；build_tracer MUST 在無 salt 時不啟用 LangFuse。"""
+    if not user_id or not salt:
         return None
-    return hashlib.sha256(f"{salt}{user_id}".encode()).hexdigest()[:16]
+    return hmac.new(salt.encode(), user_id.encode(), hashlib.sha256).hexdigest()[:32]
 
 
 @contextmanager
@@ -140,7 +151,10 @@ def _safe_cm(enters: list[Callable[[], AbstractContextManager]]) -> Iterator[Non
             stack.enter_context(make())
     except Exception:  # noqa: BLE001  tracer enter 失敗→無追蹤續行
         logger.warning("tracer enter 失敗→改無追蹤續行", exc_info=True)
-        stack.close()
+        try:
+            stack.close()   # 回滾已進入的 CM
+        except Exception:  # noqa: BLE001  回滾 exit 也失敗→忽略，絕不逃出 _safe_cm
+            logger.warning("tracer enter 回滾失敗（忽略）", exc_info=True)
         stack = None  # type: ignore[assignment]
     try:
         yield
@@ -265,12 +279,13 @@ class _FakeLangfuse:
         self.flushed += 1
 
 
-def test_pseudonymize_is_stable_and_not_raw():
-    p = _pseudonymize("user-123", salt="s")
-    assert p and p != "user-123" and len(p) == 16
-    assert p == _pseudonymize("user-123", salt="s")          # 穩定
-    assert p != _pseudonymize("user-123", salt="other")      # salt 影響
-    assert _pseudonymize(None) is None
+def test_pseudonymize_hmac_stable_not_raw_requires_salt():
+    p = _pseudonymize("user-123", salt="high-entropy-salt")
+    assert p and p != "user-123" and len(p) == 32          # 128 bits hex
+    assert p == _pseudonymize("user-123", salt="high-entropy-salt")    # 穩定
+    assert p != _pseudonymize("user-123", salt="other-salt")           # salt 影響
+    assert _pseudonymize("user-123", salt="") is None      # 空 salt→None（不可反查）
+    assert _pseudonymize(None, salt="s") is None
 
 
 def test_build_tracer_noop_when_unconfigured():
@@ -283,8 +298,17 @@ def test_build_tracer_langfuse_when_configured(monkeypatch):
             pass
     monkeypatch.setattr("langfuse.Langfuse", _FakeLF)
     t = build_tracer(_settings(
-        langfuse_host="http://lf:3000", langfuse_public_key="pk", langfuse_secret_key="sk"))
+        langfuse_host="http://lf:3000", langfuse_public_key="pk", langfuse_secret_key="sk",
+        langfuse_user_id_salt="high-entropy-salt"))
     assert isinstance(t, LangfuseTracer)
+
+
+def test_build_tracer_noop_when_salt_missing(monkeypatch):
+    # 有 LangFuse 金鑰但無 salt→拒啟用（NoOp），防低熵 ID 假名反查（Codex#2 v2）
+    monkeypatch.setattr("langfuse.Langfuse", lambda **kw: object())
+    t = build_tracer(_settings(
+        langfuse_host="http://lf:3000", langfuse_public_key="pk", langfuse_secret_key="sk"))
+    assert isinstance(t, NoOpTracer)
 
 
 def test_build_tracer_fail_open_when_construction_raises(monkeypatch):
@@ -292,18 +316,23 @@ def test_build_tracer_fail_open_when_construction_raises(monkeypatch):
         raise RuntimeError("construct boom")
     monkeypatch.setattr("langfuse.Langfuse", _boom)
     t = build_tracer(_settings(
-        langfuse_host="http://lf:3000", langfuse_public_key="pk", langfuse_secret_key="sk"))
+        langfuse_host="http://lf:3000", langfuse_public_key="pk", langfuse_secret_key="sk",
+        langfuse_user_id_salt="s"))
     assert isinstance(t, NoOpTracer)   # 建構失敗→fail-open NoOp，不擋啟動
 
 
-async def test_langfuse_tracer_uses_pseudonymous_user_id_only():
+async def test_langfuse_tracer_pseudonymous_user_id_and_metadata_allowlist():
     fake = _FakeLangfuse()
-    t = LangfuseTracer(fake, id_salt="s")
-    with t.trace("chat", user_id="raw-user-9", metadata={"is_followup": False}):
+    t = LangfuseTracer(fake, id_salt="high-entropy-salt")
+    with t.trace("chat", user_id="raw-user-9",
+                 metadata={"is_followup": False, "query": "肱二頭肌", "user_id": "raw-user-9"}):
         pass
-    # propagate_attributes 收到的 user_id 必為假名、絕非原始；metadata 不含 query/原始 id
-    assert fake.attrs and fake.attrs[0]["user_id"] == _pseudonymize("raw-user-9", "s")
-    assert fake.attrs[0]["user_id"] != "raw-user-9"
+    attrs = fake.attrs[0]
+    assert attrs["user_id"] == _pseudonymize("raw-user-9", "high-entropy-salt")
+    assert attrs["user_id"] != "raw-user-9"
+    md = attrs["metadata"]
+    assert md.get("is_followup") is False
+    assert "query" not in md and "user_id" not in md   # metadata allowlist 擋掉自由文字/原始 id
 
 
 async def test_langfuse_tracer_span_and_score_delegate():
@@ -334,6 +363,24 @@ async def test_langfuse_tracer_does_not_swallow_body_exception():
 
 async def test_langfuse_tracer_score_fail_open():
     LangfuseTracer(_FakeLangfuse(fail_score=True)).score("x", 1.0)  # 不拋
+
+
+async def test_safe_cm_partial_enter_then_rollback_failure_does_not_escape():
+    # Codex#3 v2：第一個 CM enter OK 但 exit 拋；第二個 CM enter 拋→回滾第一個 exit 又拋。
+    # _safe_cm 不得讓任何 tracer 例外逃出（業務照常執行）。
+    from anatomy_backend.observability.tracing import _safe_cm
+
+    @contextmanager
+    def _ok_enter_bad_exit():
+        yield
+        raise RuntimeError("exit boom")
+
+    def _bad_enter():
+        raise RuntimeError("enter boom")
+
+    with _safe_cm([lambda: _ok_enter_bad_exit(), _bad_enter]):
+        r = 99
+    assert r == 99
 ```
 
 - [ ] **Step 3：跑測試確認失敗**
@@ -344,9 +391,13 @@ Expected: FAIL（`ImportError: LangfuseTracer`）
 - [ ] **Step 4：實作 `LangfuseTracer` + `build_tracer`（加到 `tracing.py`）**
 
 ```python
+# trace metadata 只允許這些非自由文字、非識別性欄位進 LangFuse（其餘一律丟棄，Codex#4 v2）。
+_ALLOWED_METADATA_KEYS = frozenset({"is_followup", "kb_version", "status", "cache_hit", "lang"})
+
+
 class LangfuseTracer:
     """包 LangFuse v4 client（OTel）。trace/span 經 _safe_cm fail-open；
-    只收假名化 user_id（D-M）；score/flush fail-open。"""
+    只收假名化 user_id（D-M）+ metadata allowlist；score/flush fail-open。"""
 
     def __init__(self, client, *, id_salt: str = "") -> None:
         self._lf = client
@@ -356,7 +407,9 @@ class LangfuseTracer:
         self, name: str, *, user_id: str | None = None, metadata: dict | None = None
     ) -> AbstractContextManager[None]:
         pseudo = _pseudonymize(user_id, self._salt)   # 只送假名，絕不送原始
-        attrs = {"user_id": pseudo, "metadata": metadata or {}}
+        # metadata allowlist：只放核准欄位，擋掉 query/檢索內容/原始 id 等誤傳
+        safe_md = {k: v for k, v in (metadata or {}).items() if k in _ALLOWED_METADATA_KEYS}
+        attrs = {"user_id": pseudo, "metadata": safe_md}
         return _safe_cm([
             lambda: self._lf.propagate_attributes(**attrs),
             lambda: self._lf.start_as_current_observation(name=name),
@@ -379,12 +432,18 @@ class LangfuseTracer:
 
 
 def build_tracer(settings) -> Tracer:
-    """依設定回傳 tracer（DL-026）。三金鑰齊備才嘗試 LangfuseTracer；
-    import/建構任何失敗→fail-open NoOpTracer（絕不擋啟動）。"""
+    """依設定回傳 tracer（DL-026）。三金鑰齊備**且** salt 非空才嘗試 LangfuseTracer；
+    缺 salt→拒啟用（防假名反查）；import/建構任何失敗→fail-open NoOpTracer（絕不擋啟動）。"""
     host = getattr(settings, "langfuse_host", "")
     pk = getattr(settings, "langfuse_public_key", "")
     sk = getattr(settings, "langfuse_secret_key", "")
+    salt = getattr(settings, "langfuse_user_id_salt", "")
     if not (host and pk and sk):
+        return NoOpTracer()
+    if not salt:
+        logger.warning(
+            "LangFuse 金鑰齊備但缺 langfuse_user_id_salt→拒啟用（防假名反查），改 NoOpTracer"
+        )
         return NoOpTracer()
     try:
         import langfuse
@@ -392,7 +451,7 @@ def build_tracer(settings) -> Tracer:
         client = langfuse.Langfuse(
             host=host, public_key=pk, secret_key=sk, flush_at=50, flush_interval=2
         )
-        return LangfuseTracer(client, id_salt=getattr(settings, "langfuse_user_id_salt", ""))
+        return LangfuseTracer(client, id_salt=salt)
     except Exception:  # noqa: BLE001  SDK 缺失/建構失敗→fail-open
         logger.warning("build_tracer 建構 LangFuse 失敗→NoOpTracer", exc_info=True)
         return NoOpTracer()
@@ -427,7 +486,6 @@ from __future__ import annotations
 from anatomy_backend.config import Settings
 from anatomy_backend.observability.errors import init_sentry, scrub_event
 
-_R = "[redacted]"
 _Q = "肱二頭肌的起止點是什麼"   # 代表 query/PHI 文字
 
 
@@ -452,42 +510,45 @@ def _has(obj, needle) -> bool:
     return False
 
 
-def test_scrub_removes_query_from_exception_value():
-    ev = {"exception": {"values": [{"type": "ValueError", "value": f"invalid query: {_Q}",
-          "stacktrace": {"frames": [{"function": "f", "vars": {"query": _Q}}]}}]}}
-    out = scrub_event(ev, {})
-    assert not _has(out, _Q)   # 例外訊息與 frame vars 內的 query 皆不得殘留
-
-
-def test_scrub_removes_query_from_message_and_breadcrumbs_and_logentry():
+def test_scrub_allowlist_drops_all_free_text_and_identifiers():
     ev = {
-        "message": f"failed for {_Q}",
-        "logentry": {"message": f"q={_Q}"},
+        "level": "error",
+        "exception": {"values": [{"type": "ValueError", "value": f"invalid: {_Q}",
+            "stacktrace": {"frames": [{"function": "f", "lineno": 1,
+                                       "vars": {"query": _Q}, "context_line": _Q}]}}]},
+        "message": f"failed {_Q}",
+        "logentry": {"message": _Q},
         "breadcrumbs": {"values": [{"message": _Q, "data": {"q": _Q}}]},
+        "request": {"data": {"query": _Q}, "query_string": f"q={_Q}"},
+        "extra": {"whatever": _Q},
+        "user": {"id": "B12345678", "username": _Q},
+        "tags": {"note": _Q},
+        "contexts": {"trace": {"trace_id": "abc", "user_id": "B12345678"},
+                     "custom": {"note": _Q}},
     }
-    assert not _has(scrub_event(ev, {}), _Q)
-
-
-def test_scrub_removes_query_from_request_and_extra():
-    ev = {"request": {"data": {"query": _Q}, "query_string": f"q={_Q}",
-          "headers": {"Cookie": "x"}}, "extra": {"whatever": _Q}}
-    assert not _has(scrub_event(ev, {}), _Q)
-
-
-def test_scrub_redacts_sensitive_keys_in_contexts():
-    ev = {"contexts": {"trace": {"user_id": "B12345678", "country": "TW", "safe": "ok"}}}
     out = scrub_event(ev, {})
-    assert out["contexts"]["trace"]["user_id"] == _R
-    assert out["contexts"]["trace"]["country"] == _R
-    assert out["contexts"]["trace"]["safe"] == "ok"
+    assert not _has(out, _Q)            # 任何自由文字皆不得殘留
+    assert not _has(out, "B12345678")  # 原始識別碼亦不得殘留
+    # 安全結構保留
+    assert out["level"] == "error"
+    assert out["exception"]["values"][0]["type"] == "ValueError"
+    assert out["exception"]["values"][0]["stacktrace"]["frames"][0]["function"] == "f"
+    # 自由文字/識別性容器整塊丟棄
+    for dropped in ("user", "tags", "extra", "breadcrumbs", "request", "message", "logentry"):
+        assert dropped not in out
+    assert "custom" not in out["contexts"]   # 未核准 context 型別丟棄
+    assert "trace" in out["contexts"]        # 核准型別保留（已 key-scrub→user_id 已遮）
 
 
-def test_scrub_returns_none_on_error_or_non_dict():
+def test_scrub_returns_none_on_non_dict():
     assert scrub_event("not a dict", {}) is None
+
+
+def test_scrub_returns_none_on_error():
     class _Boom(dict):
-        def items(self):
+        def get(self, *a, **k):
             raise RuntimeError("boom")
-    assert scrub_event(_Boom(contexts={"a": 1}), {}) is None
+    assert scrub_event(_Boom(), {}) is None
 
 
 def test_init_sentry_noop_without_dsn():
@@ -519,11 +580,12 @@ Expected: FAIL（`ModuleNotFoundError`）
 - [ ] **Step 3：實作 `errors.py`（default-deny）**
 
 ```python
-"""Sentry 錯誤回報 + before_send default-deny 脫敏（§6.5 / D-M / DL-026）。
+"""Sentry 錯誤回報 + before_send 結構 allowlist 脫敏（§6.5 / D-M / DL-026）。
 
-D-M：不做內容層 PHI 攔截，改在外送 Sentry 時 default-deny——移除所有自由文字面
-（exception value/frame vars/message/logentry/breadcrumbs/request/extra），再遞迴 key-scrub。
-空 DSN→no-op；init 失敗→fail-open False；脫敏出錯或非 dict→回 None 丟棄該 event。
+D-M：不做內容層 PHI 攔截，改在外送 Sentry 時**結構 allowlist**——只保留明確核准的非自由文字
+欄位，其餘（user/tags/extra/breadcrumbs/request/message/logentry/未知頂層）整塊丟棄；例外僅留
+type+stacktrace 結構（去 value/vars/context_line）；contexts 僅留核准型別並再 key-scrub。
+空 DSN→no-op；init 失敗→fail-open False；非 dict/出錯→回 None 丟棄該 event。
 """
 from __future__ import annotations
 
@@ -554,41 +616,53 @@ def _scrub(obj):
     return obj
 
 
+# 結構 allowlist：只保留明確安全（非自由文字、非識別性）的頂層欄位；其餘整塊丟棄。
+_ALLOWED_TOP_KEYS = frozenset({
+    "event_id", "timestamp", "level", "platform", "logger",
+    "sdk", "release", "environment", "server_name", "transaction", "modules",
+})
+_ALLOWED_CONTEXT_TYPES = frozenset({"runtime", "os", "device", "trace"})
+_ALLOWED_FRAME_KEYS = frozenset({"filename", "module", "function", "lineno", "in_app", "abs_path"})
+
+
+def _safe_exc_value(v: dict) -> dict:
+    """例外只保留 type 與 stacktrace 結構（frame 僅位置欄位）——去除 value/vars/context_line。"""
+    out: dict = {}
+    if isinstance(v.get("type"), str):
+        out["type"] = v["type"]
+    st = v.get("stacktrace")
+    if isinstance(st, dict):
+        out["stacktrace"] = {
+            "frames": [
+                {k: fr[k] for k in _ALLOWED_FRAME_KEYS if k in fr}
+                for fr in (st.get("frames") or [])
+                if isinstance(fr, dict)
+            ]
+        }
+    return out
+
+
 def scrub_event(event, hint):
-    """Sentry before_send（default-deny）：移除自由文字面 + 遞迴 key-scrub；出錯/非 dict→None。"""
+    """Sentry before_send（**結構 allowlist**）：只保留核准頂層欄位，其餘（user/tags/extra/
+    breadcrumbs/request/message/logentry/未知）整塊丟棄；例外僅留 type+stacktrace；contexts 僅留
+    核准型別並再 key-scrub。非 dict/出錯→回 None 丟棄該 event。"""
     try:
         if not isinstance(event, dict):
             return None
+        out = {k: event[k] for k in _ALLOWED_TOP_KEYS if k in event}
         exc = event.get("exception")
         if isinstance(exc, dict):
-            for v in exc.get("values") or []:
-                if isinstance(v, dict):
-                    if "value" in v:
-                        v["value"] = _REDACTED
-                    st = v.get("stacktrace")
-                    if isinstance(st, dict):
-                        for fr in st.get("frames") or []:
-                            if isinstance(fr, dict) and "vars" in fr:
-                                fr["vars"] = _REDACTED
-        for k in ("message", "logentry"):
-            if k in event:
-                event[k] = _REDACTED
-        bc = event.get("breadcrumbs")
-        crumbs = bc.get("values") if isinstance(bc, dict) else bc
-        if isinstance(crumbs, list):
-            for c in crumbs:
-                if isinstance(c, dict):
-                    for k in ("message", "data"):
-                        if k in c:
-                            c[k] = _REDACTED
-        req = event.get("request")
-        if isinstance(req, dict):
-            for k in ("data", "query_string", "cookies", "headers", "env"):
-                if k in req:
-                    req[k] = _REDACTED
-        if "extra" in event:
-            event["extra"] = _REDACTED
-        return _scrub(event)   # 遞迴 key-scrub（涵蓋 contexts 等殘留敏感鍵）
+            out["exception"] = {
+                "values": [
+                    _safe_exc_value(v) for v in (exc.get("values") or []) if isinstance(v, dict)
+                ]
+            }
+        ctx = event.get("contexts")
+        if isinstance(ctx, dict):
+            out["contexts"] = {
+                t: _scrub(ctx[t]) for t in _ALLOWED_CONTEXT_TYPES if isinstance(ctx.get(t), dict)
+            }
+        return out
     except Exception:  # noqa: BLE001  寧可丟棄也不洩漏
         logger.warning("Sentry scrub_event 失敗→丟棄該 event", exc_info=True)
         return None
@@ -919,6 +993,33 @@ async def test_spawn_isolates_contextvars():
     _spawn(_job())
     await asyncio.sleep(0.05)
     assert seen["v"] == "default"   # 未繼承 parent-value → context 已隔離
+
+
+async def test_flush_tracer_does_not_raise_on_error():
+    from anatomy_backend.api.main import flush_tracer
+
+    class _BoomTracer:
+        def flush(self):
+            raise RuntimeError("flush boom")
+
+    await flush_tracer(_BoomTracer(), timeout=1.0)   # 不拋（fail-open）
+
+
+async def test_flush_tracer_bounded_by_timeout():
+    # Codex#5 v2：flush 阻塞時，flush_tracer 仍在 timeout 附近返回，不卡 shutdown。
+    import asyncio
+    import time
+
+    from anatomy_backend.api.main import flush_tracer
+
+    class _StuckTracer:
+        def flush(self):
+            time.sleep(0.5)
+
+    loop = asyncio.get_event_loop()
+    start = loop.time()
+    await flush_tracer(_StuckTracer(), timeout=0.05)
+    assert loop.time() - start < 0.4   # 未等滿 0.5s
 ```
 
 - [ ] **Step 2：跑測試確認失敗**
@@ -948,7 +1049,20 @@ lifespan 早段（建 settings 後）加：
     tracer = build_tracer(settings)  # 無金鑰/建構失敗→NoOpTracer
 ```
 
-`_build_chat_deps` 的 `ChatDeps(...)` 加 `tracer=tracer`；`app.state.tracer = tracer`；cleanup 段加 `tracer.flush()`。
+`_build_chat_deps` 的 `ChatDeps(...)` 加 `tracer=tracer`；`app.state.tracer = tracer`。
+
+並在 `main.py` 模組層（`_spawn` 附近）加**有界 flush** helper（Codex#5 v2：同步 flush 可能阻塞，須 to_thread + timeout，不可卡事件迴圈/容器終止）：
+
+```python
+async def flush_tracer(tracer, *, timeout: float = 2.0) -> None:
+    """有界 flush：to_thread + wait_for；逾時(TimeoutError⊂Exception)/失敗→記錄續行。"""
+    try:
+        await asyncio.wait_for(asyncio.to_thread(tracer.flush), timeout=timeout)
+    except Exception:  # noqa: BLE001
+        logger.warning("tracer.flush 逾時/失敗（忽略），繼續關閉", exc_info=True)
+```
+
+cleanup 段（`await pool.close()` 旁）改呼叫：`await flush_tracer(tracer)`（**不**直接 `tracer.flush()`）。
 
 - [ ] **Step 5：跑測試確認通過 + 不破**
 
@@ -981,9 +1095,9 @@ git commit -m "feat(obs): main lifespan init_sentry+build_tracer+flush；_spawn 
 DL-011 定觀測先 LangFuse+Sentry、Prometheus 延後；D-M 定改 Sentry/LangFuse 脫敏並 strip user_id；§6.5 又要求「每筆 trace 含 user_id 以可追蹤」。Phase 9 落地需在「無外部 standup」下交付且可測，並化解 §6.5 與 D-M 的張力。
 
 ### 提案（與 DL-011/D-M 一致；化解 §6.5×D-M）
-1. **mock-first + fail-open**：`build_tracer` 無金鑰/import/建構失敗→`NoOpTracer`；`init_sentry` 無 DSN/init 失敗→False；tracer trace/span/score/flush 任一例外不中斷 `/chat`（`_safe_cm` 只抑制 tracer enter/exit、不二次 yield、不吞業務例外）。CI 零外部呼叫。
-2. **假名化 trace id 化解 §6.5×D-M**：LangFuse 只收 `sha256(salt+user_id)` 假名（§6.5「可追蹤」），**MUST NOT** 收原始 user_id/學號/query/檢索內容（D-M「移除識別資訊」）。
-3. **Sentry default-deny 脫敏（D-M）**：`send_default_pii=False` + `max_request_body_size="never"` + `include_local_variables=False` + `before_send` 移除 exception value/frame vars/message/logentry/breadcrumbs/request/extra 等**所有自由文字面**，再遞迴 key-scrub；非 dict/出錯→回 None 丟棄 event。
+1. **mock-first + fail-open**：`build_tracer` 無金鑰/缺 salt/import/建構失敗→`NoOpTracer`；`init_sentry` 無 DSN/init 失敗→False；tracer trace/span/score/flush 任一例外不中斷 `/chat`（`_safe_cm` 只抑制 tracer enter/exit、不二次 yield、不吞業務例外，含 enter 回滾再失敗）；**shutdown flush 有界**（to_thread + wait_for timeout）不卡關閉。CI 零外部呼叫。
+2. **假名化 trace id 化解 §6.5×D-M**：LangFuse 只收 **HMAC-SHA256(key=高熵 salt, msg=user_id)** 假名（128 bits；§6.5「可追蹤」），**缺 salt 則不啟用 LangFuse**（防低熵 ID 字典反查）；trace metadata 採 **allowlist**；**MUST NOT** 收原始 user_id/學號/query/檢索內容（D-M）。
+3. **Sentry 結構 allowlist 脫敏（D-M）**：`send_default_pii=False` + `max_request_body_size="never"` + `include_local_variables=False` + `before_send` **只保留核准頂層欄位 + 例外 type/stacktrace 結構 + 核准 contexts 型別**，其餘（user/tags/extra/breadcrumbs/request/message/logentry/未知）整塊丟棄；非 dict/出錯→回 None 丟棄 event。
 4. **背景任務 context 隔離**：`_spawn` 用乾淨 `contextvars.Context()`，detached log/cache 任務不繼承 OTel span（防錯置/洩漏）。
 5. **metrics 走 LangFuse score + 結構化 log**（cache_hit/citation_verified/latency）；**Prometheus/Grafana 維持延後（DL-011）**。
 6. **告警誠實降級**：本 phase 只交付 `evaluate_alerts` 條件邏輯 + `Notifier` 介面（預設 `LogNotifier`）。**§7.5 MUST 告警在 v1 尚未 operational**——metrics 來源彙整、連續時間窗排程、真實 Slack/email 管道與 owner **延後 ops**（新連線，先問）。
