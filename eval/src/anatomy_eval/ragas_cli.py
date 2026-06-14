@@ -58,23 +58,62 @@ def _mock_answer_provider(qa: GoldenQA) -> tuple[str, list[str]]:
 
 
 def _make_real_answer_provider() -> AnswerProvider:  # pragma: no cover
-    """Build a real answer provider that calls the /chat pipeline.
+    """Build a real answer provider that calls the /chat SSE pipeline.
 
-    NOT called in --mock mode.  Requires a running backend.
+    [C-3] Implements the correct /chat contract:
+    - POST ``{"messages": [{"role": "user", "content": <query>}],
+              "metadata_filter": <dict|null>}``
+    - Consume SSE stream (Vercel AI UI Message Stream format, DL-018):
+        * ``{"type": "text-delta", "id": ..., "delta": "..."}`` → accumulate answer
+        * ``{"type": "data-sources", "data": [...]}`` → retrieve contexts (snippets)
+        * ``data: [DONE]`` → stop
+    - Return ``(answer: str, retrieved_contexts: list[str])``.
+
+    NOT called in --mock mode.  Requires a running backend at
+    ``EVAL_BACKEND_URL`` (default ``http://localhost:8000``).  Stays
+    ``pragma: no cover`` — CI does not start a backend.
     """
     import httpx  # lazy import — not installed in CI ragas job
 
     base_url = os.environ.get("EVAL_BACKEND_URL", "http://localhost:8000")
 
     def _provider(qa: GoldenQA) -> tuple[str, list[str]]:
-        resp = httpx.post(
-            f"{base_url}/chat",
-            json={"query": qa.query, "kb_version": "active"},
-            timeout=60.0,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("answer", ""), data.get("sources", [])
+        body = {
+            "messages": [{"role": "user", "content": qa.query}],
+            "metadata_filter": qa.metadata_filter,
+        }
+        answer_parts: list[str] = []
+        sources: list[dict] = []
+
+        with httpx.Client(timeout=60.0) as client:
+            with client.stream("POST", f"{base_url}/chat", json=body) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    payload_str = line[len("data: "):]
+                    if payload_str.strip() == "[DONE]":
+                        break
+                    try:
+                        frame = json.loads(payload_str)
+                    except json.JSONDecodeError:
+                        continue
+                    frame_type = frame.get("type", "")
+                    if frame_type == "text-delta":
+                        delta = frame.get("delta", "")
+                        if delta:
+                            answer_parts.append(delta)
+                    elif frame_type == "data-sources":
+                        raw = frame.get("data", [])
+                        if isinstance(raw, list):
+                            sources = raw
+
+        answer = "".join(answer_parts)
+        # Use snippet field for retrieved_contexts (plain text, suitable for RAGAS).
+        retrieved_contexts = [
+            s.get("snippet", "") for s in sources if isinstance(s, dict)
+        ]
+        return answer, retrieved_contexts
 
     return _provider
 
@@ -128,13 +167,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[anatomy-eval-ragas] ERROR loading golden: {exc}", file=sys.stderr)
         return 1
 
-    # Print readiness (warning only — DL-028: not blocking even if <110 entries).
+    # H-2: --real must enforce golden readiness; --mock is warning-only (DL-028).
     readiness = golden_readiness(golden)
     if not readiness["ready"]:
+        if args.real:
+            print(
+                f"[anatomy-eval-ragas] ERROR: --real 需要黃金題庫就緒（DL-028）: "
+                f"total={readiness['total']}, shortfall={readiness['shortfall']}。"
+                " 補充黃金題庫至 ≥110 題且各類達標後再執行 --real。",
+                file=sys.stderr,
+            )
+            return 1
         print(
             f"[anatomy-eval-ragas] WARNING: golden not ready for live gate "
             f"(total={readiness['total']}, shortfall={readiness['shortfall']}). "
-            "Continuing (DL-028: warning only until ≥110 entries).",
+            "Continuing (DL-028: warning only for --mock).",
             file=sys.stderr,
         )
 
@@ -159,7 +206,9 @@ def main(argv: list[str] | None = None) -> int:
         from ragas.embeddings import LangchainEmbeddingsWrapper  # type: ignore[import]
         from ragas.llms import LangchainLLMWrapper  # type: ignore[import]
 
-        llm = LangchainLLMWrapper(ChatOpenAI(api_key=eval_key, model="gpt-4o-mini"))
+        # H-3: read eval model from env (附錄 A: EVAL_OPENAI_MODEL, default gpt-5.5).
+        eval_model = os.environ.get("EVAL_OPENAI_MODEL", "gpt-5.5")
+        llm = LangchainLLMWrapper(ChatOpenAI(api_key=eval_key, model=eval_model))
         emb = LangchainEmbeddingsWrapper(OpenAIEmbeddings(api_key=eval_key))
         rows = build_rows_from_golden(golden, _make_real_answer_provider())
         result = run_eval(

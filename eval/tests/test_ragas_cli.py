@@ -103,3 +103,27 @@ def test_cli_requires_mock_or_real(tmp_path):
             "--golden", str(SEED_GOLDEN),
             "--report", str(tmp_path / "report.json"),
         ])
+
+
+@pytest.mark.ragas
+def test_cli_real_exits_1_if_golden_not_ready(tmp_path):
+    """--real 在黃金題庫未就緒（< 110 題）時必須 exit 1（H-2）。
+
+    seed 黃金題庫 (golden_qa.seed.jsonl) 題數遠少於 110，readiness["ready"] = False。
+    --real 不應耗費 API token 繼續執行，必須提前 exit 1 並不寫出 report。
+    --mock 維持 warning-only（不受此限）。
+    """
+    report_path = tmp_path / "report.json"
+    exit_code = main([
+        "--golden", str(SEED_GOLDEN),
+        "--report", str(report_path),
+        "--real",
+    ])
+    assert exit_code == 1, (
+        f"Expected exit 1 for --real with non-ready golden (< 110 entries), "
+        f"got {exit_code}"
+    )
+    # report.json を書いてはいけない（API 呼び出しに到達していないことの証明）
+    assert not report_path.exists(), (
+        "report.json must NOT be written when --real exits early due to golden not ready"
+    )
