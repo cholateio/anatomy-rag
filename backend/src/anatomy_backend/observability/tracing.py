@@ -98,9 +98,10 @@ class NoOpTracer:
 
 # trace metadata 只允許這些 key（Codex#4 v2）；value 限 primitive 或短 enum（Codex#high v3）。
 _ALLOWED_METADATA_KEYS = frozenset({"is_followup", "kb_version", "status", "cache_hit", "lang"})
-# score name 固定 allowlist（Codex#high v3）；comment 一律不外送（防自由文字）。
-_ALLOWED_SCORE_NAMES = frozenset({"cache_hit", "citation_verified", "latency_ms", "status_ok"})
+# score name 固定 allowlist（Codex#high v3）；comment 一律不外送（防自由文字）。只列實際發送者。
+_ALLOWED_SCORE_NAMES = frozenset({"cache_hit", "citation_verified"})
 _MAX_METADATA_STR = 16  # 短 enum 上限；query/檢索內容必更長→擋下自由文字偽裝成核准 key
+_MIN_SALT_LEN = 16      # 假名化 salt 最低長度（Opus L5：低熵學號 + 弱 salt 可字典反查）
 
 
 def _safe_metadata_value(v) -> bool:
@@ -114,24 +115,28 @@ class LangfuseTracer:
     """包 LangFuse v4 client（OTel）。trace/span 經 _safe_cm fail-open；
     只收假名化 user_id（D-M）+ metadata/score name allowlist；score/flush fail-open。"""
 
-    def __init__(self, client, *, id_salt: str = "") -> None:
+    def __init__(self, client, *, id_salt: str = "", propagate=None) -> None:
         self._lf = client
         self._salt = id_salt
+        # propagate＝LangFuse v4 的**模組層** propagate_attributes（client 無此方法，Opus H1）；
+        # 注入以利測試 + 避免呼叫不存在方法。None→只開 root observation、不設 trace 屬性。
+        self._propagate = propagate
 
     def trace(
         self, name: str, *, user_id: str | None = None, metadata: dict | None = None
     ) -> AbstractContextManager[None]:
         pseudo = _pseudonymize(user_id, self._salt)   # 只送假名，絕不送原始
-        # metadata key + value allowlist：擋掉 query/檢索內容/原始 id（含偽裝成核准 key 的長字串）
+        # metadata key + value allowlist：擋掉 query/檢索內容/原始 id（含偽裝成核准 key 的長字串）；
+        # 值轉 str（propagate_attributes/baggage 需字串）。
         safe_md = {
-            k: v for k, v in (metadata or {}).items()
+            k: str(v) for k, v in (metadata or {}).items()
             if k in _ALLOWED_METADATA_KEYS and _safe_metadata_value(v)
         }
-        attrs = {"user_id": pseudo, "metadata": safe_md}
-        return _safe_cm([
-            lambda: self._lf.propagate_attributes(**attrs),
-            lambda: self._lf.start_as_current_observation(name=name),
-        ])
+        enters = []
+        if self._propagate is not None:
+            enters.append(lambda: self._propagate(user_id=pseudo, metadata=safe_md))
+        enters.append(lambda: self._lf.start_as_current_observation(name=name))
+        return _safe_cm(enters)
 
     def span(self, name: str) -> AbstractContextManager[None]:
         return _safe_cm([lambda: self._lf.start_as_current_observation(name=name)])
@@ -162,9 +167,10 @@ def build_tracer(settings) -> Tracer:
     salt = getattr(settings, "langfuse_user_id_salt", "")
     if not (host and pk and sk):
         return NoOpTracer()
-    if not salt:
+    if len(salt) < _MIN_SALT_LEN:
         logger.warning(
-            "LangFuse 金鑰齊備但缺 langfuse_user_id_salt→拒啟用（防假名反查），改 NoOpTracer"
+            "langfuse_user_id_salt 太短(<%d)→拒啟用 LangFuse（防假名字典反查），改 NoOpTracer",
+            _MIN_SALT_LEN,
         )
         return NoOpTracer()
     try:
@@ -173,7 +179,8 @@ def build_tracer(settings) -> Tracer:
         client = langfuse.Langfuse(
             host=host, public_key=pk, secret_key=sk, flush_at=50, flush_interval=2
         )
-        return LangfuseTracer(client, id_salt=salt)
+        # propagate_attributes 為模組層函式（非 client 方法，Opus H1）
+        return LangfuseTracer(client, id_salt=salt, propagate=langfuse.propagate_attributes)
     except Exception:  # noqa: BLE001  SDK 缺失/建構失敗→fail-open
         logger.warning("build_tracer 建構 LangFuse 失敗→NoOpTracer", exc_info=True)
         return NoOpTracer()

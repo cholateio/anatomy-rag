@@ -112,13 +112,13 @@ def test_build_tracer_fail_open_when_construction_raises(monkeypatch):
     monkeypatch.setattr("langfuse.Langfuse", _boom)
     t = build_tracer(_settings(
         langfuse_host="http://lf:3000", langfuse_public_key="pk", langfuse_secret_key="sk",
-        langfuse_user_id_salt="s"))
+        langfuse_user_id_salt="high-entropy-salt"))   # salt 夠長→真正進到建構→建構失敗 fail-open
     assert isinstance(t, NoOpTracer)   # 建構失敗→fail-open NoOp，不擋啟動
 
 
 async def test_langfuse_tracer_pseudonymous_user_id_and_metadata_allowlist():
     fake = _FakeLangfuse()
-    t = LangfuseTracer(fake, id_salt="high-entropy-salt")
+    t = LangfuseTracer(fake, id_salt="high-entropy-salt", propagate=fake.propagate_attributes)
     with t.trace("chat", user_id="raw-user-9",
                  metadata={"is_followup": False, "query": "肱二頭肌", "user_id": "raw-user-9"}):
         pass
@@ -126,7 +126,7 @@ async def test_langfuse_tracer_pseudonymous_user_id_and_metadata_allowlist():
     assert attrs["user_id"] == _pseudonymize("raw-user-9", "high-entropy-salt")
     assert attrs["user_id"] != "raw-user-9"
     md = attrs["metadata"]
-    assert md.get("is_followup") is False
+    assert md["is_followup"] == "False"   # 值轉 str（propagate_attributes/baggage 需字串）
     assert "query" not in md and "user_id" not in md   # metadata allowlist 擋掉自由文字/原始 id
 
 
@@ -200,14 +200,24 @@ async def test_safe_cm_forwards_body_exception_to_span_exit():
 
 async def test_langfuse_metadata_value_validation_and_score_allowlist():
     fake = _FakeLangfuse()
-    t = LangfuseTracer(fake, id_salt="s")
+    t = LangfuseTracer(fake, id_salt="high-entropy-salt", propagate=fake.propagate_attributes)
     long_text = "這是一段很長的查詢文字應被擋下" * 2   # >16 字
     with t.trace("chat", user_id="u",
                  metadata={"status": long_text, "is_followup": True, "kb_version": 1}):
         pass
     md = fake.attrs[0]["metadata"]
-    assert md == {"is_followup": True, "kb_version": 1}   # 長字串 value 被擋；只留安全 primitive
+    assert md == {"is_followup": "True", "kb_version": "1"}  # 長字串 value 被擋；primitive 轉 str
     t.score("cache_hit", 1.0)                              # allowlist name→送
     t.score("evil_name", 1.0, comment="leak query")       # 非 allowlist→丟棄、comment 不外送
     assert ("cache_hit", 1.0) in fake.scores
     assert all(n != "evil_name" for n, _ in fake.scores)
+
+
+def test_langfuse_real_sdk_surface_contract():
+    # 防 mock drift（Opus H1）：本程式碼呼叫的 LangFuse v4 介面必須真實存在於安裝的 SDK。
+    import langfuse
+
+    assert hasattr(langfuse, "propagate_attributes")                  # 模組層函式（非 client 方法）
+    assert hasattr(langfuse.Langfuse, "start_as_current_observation")
+    assert hasattr(langfuse.Langfuse, "score_current_span")
+    assert hasattr(langfuse.Langfuse, "flush")

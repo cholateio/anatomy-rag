@@ -35,6 +35,9 @@ def _scrub(obj):
 
 
 # 結構 allowlist：只保留明確安全（非自由文字、非識別性）的頂層欄位；其餘整塊丟棄。
+# 這些欄位由 Sentry 以伺服器端來源填充（hostname/參數化 route/套件版/SDK），本架構不寫入使用者內容。
+# 前提（Opus L4）：route 為參數化名稱且**無 PII path 參數**（/chat /healthz /warmup /feedback）；
+# 未來若新增帶 path 參數的 route，transaction 可能含使用者值→須改 transaction_style 或移出。
 _ALLOWED_TOP_KEYS = frozenset({
     "event_id", "timestamp", "level", "platform", "logger",
     "sdk", "release", "environment", "server_name", "transaction", "modules",

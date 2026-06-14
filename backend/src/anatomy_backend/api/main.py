@@ -52,7 +52,11 @@ def _spawn(coro) -> None:
 
 
 async def flush_tracer(tracer, *, timeout: float = 2.0) -> None:
-    """有界 flush：to_thread + wait_for；逾時(TimeoutError⊂Exception)/失敗→記錄續行。"""
+    """有界 flush：to_thread + wait_for；逾時(TimeoutError⊂Exception)/失敗→記錄續行。
+
+    註（Opus L1）：wait_for 只取消「等待」，被 to_thread 卡住的 flush() 執行緒無法被中斷、
+    會續跑到行程結束——shutdown 情境可接受（不阻塞事件迴圈/容器終止即達標）。
+    """
     try:
         await asyncio.wait_for(asyncio.to_thread(tracer.flush), timeout=timeout)
     except Exception:  # noqa: BLE001
