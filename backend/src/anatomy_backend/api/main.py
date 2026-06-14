@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import logging
+import threading
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -52,15 +53,21 @@ def _spawn(coro) -> None:
 
 
 async def flush_tracer(tracer, *, timeout: float = 2.0) -> None:
-    """有界 flush：to_thread + wait_for；逾時(TimeoutError⊂Exception)/失敗→記錄續行。
+    """有界 flush：在 **daemon thread** 跑同步 flush，最多等 timeout。
 
-    註（Opus L1）：wait_for 只取消「等待」，被 to_thread 卡住的 flush() 執行緒無法被中斷、
-    會續跑到行程結束——shutdown 情境可接受（不阻塞事件迴圈/容器終止即達標）。
+    Codex 終審 P2：`asyncio.to_thread` 用 default executor，會在 `asyncio.run` 收尾被 join，
+    卡住的 flush 仍會延遲容器終止。改用 daemon thread（不被 join、隨行程回收）；waiter 端的
+    `t.join(timeout)` 必在 timeout 內返回→不卡 executor。逾時即放手，未送出的 trace 捨棄。
     """
-    try:
-        await asyncio.wait_for(asyncio.to_thread(tracer.flush), timeout=timeout)
-    except Exception:  # noqa: BLE001
-        logger.warning("tracer.flush 逾時/失敗（忽略），繼續關閉", exc_info=True)
+    def _run() -> None:
+        try:
+            tracer.flush()
+        except Exception:  # noqa: BLE001  flush 失敗→忽略
+            logger.warning("tracer.flush 失敗（忽略）", exc_info=True)
+
+    t = threading.Thread(target=_run, name="tracer-flush", daemon=True)
+    t.start()
+    await asyncio.to_thread(t.join, timeout)   # join(timeout) 必在 timeout 內返回，不卡 shutdown
 
 
 # ── Lifespan：全鏈路初始化（生產用；測試不觸發）──────────────────────────────
