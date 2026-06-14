@@ -1,0 +1,13 @@
+# §7.3 門檻；變更須人工審（.github/CODEOWNERS）。不得調降。
+ragas:
+  active:    # 本 phase 已實作、gate 會檢查
+    faithfulness: 0.90
+    answer_relevancy: 0.85
+    context_precision: 0.85          # LLMContextPrecisionWithoutReference
+    out_of_scope_correctness: 0.90
+  pending:   # 待教師 reference 答案後啟用（gate 不檢查、僅報告）
+    context_recall: 0.80
+recall_at_k:
+  k: 100
+  by_class: {text_only: 0.80, figure_id: 0.75, cross_page: 0.70, clinical_correlation: 0.70}
+  min_samples_per_class: 10

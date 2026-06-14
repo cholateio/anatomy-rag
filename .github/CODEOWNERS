@@ -1,0 +1,4 @@
+# CODEOWNERS — 保護門檻與黃金題庫，防止未審核調降
+# 搭配 branch protection 的 "Require review from Code Owners" 使用
+/eval/eval_thresholds.yaml @cholateio
+/tests/golden_qa.jsonl @cholateio
