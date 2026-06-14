@@ -30,4 +30,5 @@ markers = [
   "integration: 跨模組整合測試（可能需 DB/Redis/encoder）",
   "gpu: 需要 CUDA + gpu extra（torch/transformers）的測試；CI 無 torch 自動 skip（Phase 3 起）",
   "mt: 需下載真實 MarianMT 模型（312MB）的測試；RUN_MT_TESTS=1 才跑（Phase 3 起）",
+  "ragas: RAGAS 評估相關測試（需 ragas extra；CI ragas job 才跑）",
 ]
