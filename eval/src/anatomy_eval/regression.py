@@ -16,8 +16,13 @@ from anatomy_eval.golden import load_golden, parse_golden_row
 def promote_cases(cases: list[dict], regression_path: str | Path) -> int:
     """把 cases 中通過 schema 驗證且尚未存在的項目附加到 regression JSONL 檔。
 
+    **單一寫者（M-2）**：本函式假設只有 manual review tool（Streamlit UI）會呼叫，
+    v1 不含並發鎖，非 concurrent-safe。若未來需要多程序並行促進，請加 filelock。
+
     Args:
         cases: 欲促進的案例 dict 清單（未經驗證的原始資料）。
+              傳入前應先經 ``review_loader.to_golden_row()`` 投影至黃金 schema，
+              否則 parse_golden_row 可能因未知欄位 raise ValueError。
         regression_path: regression JSONL 檔路徑（不存在則建立）。
 
     Returns:

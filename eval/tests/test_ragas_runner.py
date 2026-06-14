@@ -72,25 +72,45 @@ def test_deterministic_core_offline():
 
 @pytest.mark.ragas
 def test_run_eval_never_calls_openai(monkeypatch):
-    """OpenAI constructors patched to raise — deterministic run must NOT trigger them.
+    """OpenAI constructors AND outbound HTTP patched to raise — must NOT trigger them.
 
-    This is the zero-cost / zero-OpenAI guarantee test [M-2].
-    Clearing OPENAI_API_KEY ensures no accidental env var is picked up.
+    This is the zero-cost / zero-network guarantee test [C-1].
+    Clears OPENAI_API_KEY so no accidental env var is picked up.
+
+    Three guards are applied:
+    1. openai.OpenAI / openai.AsyncOpenAI constructors → raise (zero-LLM guarantee).
+    2. requests.post → raise (RAGAS analytics guard [C-1]: proves RAGAS_DO_NOT_TRACK
+       prevents the flush to https://t.explodinggradients.com).
+    3. requests.Session.request → raise (belt-and-suspenders underlying HTTP guard).
+
+    If any outbound HTTP or OpenAI call escapes, the patched function raises
+    AssertionError and the test fails — proving the telemetry fix works.
     """
+    import requests
+
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
-    sentinel = AssertionError(
+    _openai_sentinel = AssertionError(
         "openai.OpenAI / openai.AsyncOpenAI must never be called in deterministic run"
     )
+    _network_sentinel = AssertionError(
+        "requests.post / Session.request must never be called in deterministic run [C-1]: "
+        "check RAGAS_DO_NOT_TRACK is set before ragas import in ragas_runner.py"
+    )
 
-    def _raise(*a, **kw):
-        raise sentinel
+    def _raise_openai(*a, **kw):
+        raise _openai_sentinel
 
-    monkeypatch.setattr("openai.OpenAI", _raise)
-    monkeypatch.setattr("openai.AsyncOpenAI", _raise)
+    def _raise_network(*a, **kw):
+        raise _network_sentinel
+
+    monkeypatch.setattr("openai.OpenAI", _raise_openai)
+    monkeypatch.setattr("openai.AsyncOpenAI", _raise_openai)
+    monkeypatch.setattr(requests, "post", _raise_network)
+    monkeypatch.setattr(requests.Session, "request", _raise_network)
 
     rows = _sample_rows()
-    # Must complete without raising the sentinel.
+    # Must complete without raising either sentinel.
     result = run_eval(rows, metrics=deterministic_metrics())
 
     for name, score in result.items():
@@ -190,6 +210,35 @@ def test_build_rows_from_golden():
     assert r1.is_oos is True
     assert r1.reference == OOS_PHRASE
     assert r1.answer == OOS_PHRASE
+
+
+@pytest.mark.ragas
+def test_llm_metrics_names_match_yaml_active_keys():
+    """Contract test: llm_metrics() names must exactly match eval_thresholds.yaml active keys.
+
+    [C-2] gate.check_ragas iterates ``ragas.active`` keys and calls
+    ``report.get(key)``; a missing key is treated as a fail.
+    LLMContextPrecisionWithoutReference defaults to name
+    ``llm_context_precision_without_reference`` but the YAML key is
+    ``context_precision`` — we override .name in llm_metrics().
+
+    This test ties the runner output to the gate config so a mismatch is
+    caught immediately rather than silently failing the quality gate at eval time.
+    """
+    metrics = llm_metrics()
+    names = {m.name for m in metrics}
+    yaml_active_keys = {
+        "faithfulness",
+        "answer_relevancy",
+        "context_precision",
+        "out_of_scope_correctness",
+    }
+    assert names == yaml_active_keys, (
+        f"llm_metrics() names {sorted(names)!r} != "
+        f"YAML active keys {sorted(yaml_active_keys)!r}. "
+        "Fix ragas_runner.llm_metrics() to set .name on each metric to match "
+        "the eval_thresholds.yaml ragas.active keys."
+    )
 
 
 @pytest.mark.ragas

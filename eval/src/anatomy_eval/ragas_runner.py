@@ -8,9 +8,13 @@ Three entry points:
     ``run_eval(rows, metrics=deterministic_metrics())`` — llm=None is safe.
 
 ``llm_metrics()``
-    Returns Faithfulness, ResponseRelevancy, LLMContextPrecisionWithoutReference.
-    These **require** an LLM.  Pass ``llm=<provider>`` to ``run_eval``, or it
-    will raise ``ValueError`` (guard against the OpenAI fallback).
+    Returns metrics for the real gate: Faithfulness, ResponseRelevancy,
+    LLMContextPrecisionWithoutReference (renamed to ``context_precision``),
+    and OutOfScopeCorrectness — exactly the four keys in
+    ``eval_thresholds.yaml ragas.active``.  Faithfulness / ResponseRelevancy /
+    LLMContextPrecisionWithoutReference **require** an LLM; pass
+    ``llm=<provider>`` to ``run_eval``, or it will raise ``ValueError``
+    (guard against the OpenAI fallback).
 
 ``run_eval(rows, *, metrics, llm=None, embeddings=None) -> dict[str, float]``
     Builds an EvaluationDataset from EvalRow objects, calls ragas evaluate(),
@@ -25,7 +29,22 @@ Three entry points:
 Import note: ``_ensure_compat()`` is called before ragas imports to patch the
 missing ``langchain_community.chat_models.vertexai`` module required by
 ragas 0.4.3 (see ``_ragas_compat.py``).
+
+[C-1] RAGAS analytics opt-out: ``RAGAS_DO_NOT_TRACK=true`` is set via
+``os.environ.setdefault`` here at module import time — BEFORE any ragas
+module is loaded — so ``ragas._analytics.do_not_track()`` (which is
+``lru_cache``'d on first call) always sees the flag and skips the
+``requests.post`` to ``https://t.explodinggradients.com``.
 """
+import os
+
+# C-1: Disable RAGAS telemetry BEFORE importing ragas.
+# ragas._analytics.do_not_track() is @lru_cache(maxsize=1) — it reads the env
+# var only on its first call (which happens inside evaluate() → track()).
+# Setting the var here guarantees the cache is populated with True before any
+# evaluate() call, preventing any outbound HTTP to t.explodinggradients.com.
+os.environ.setdefault("RAGAS_DO_NOT_TRACK", "true")
+
 import typing as t
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -111,13 +130,24 @@ def deterministic_metrics() -> list[t.Any]:
 
 
 def llm_metrics() -> list[t.Any]:
-    """Return LLM-based metrics for gated real evaluation runs.
+    """Return metrics for gated real evaluation runs (all four YAML active keys).
 
-    These metrics require an injected llm (and embeddings for ResponseRelevancy).
-    Passing these to ``run_eval`` without llm= will raise ValueError.
+    The returned metric names exactly match the ``ragas.active`` keys in
+    ``eval_thresholds.yaml`` so that ``gate.check_ragas`` can look each up by
+    name.  [C-2]: ``LLMContextPrecisionWithoutReference.name`` defaults to
+    ``llm_context_precision_without_reference`` — we override it to
+    ``context_precision`` (the YAML key) so the gate never sees a missing key.
+
+    Three of the four metrics (Faithfulness / ResponseRelevancy /
+    LLMContextPrecisionWithoutReference) require an injected ``llm``; passing
+    these to ``run_eval`` without ``llm=`` will raise ``ValueError``.
+    ``OutOfScopeCorrectness`` is a pure-Python metric but is included here so
+    the real-run report covers all four active thresholds.
 
     Returns:
-        [Faithfulness(), ResponseRelevancy(), LLMContextPrecisionWithoutReference()]
+        List of four metrics with ``.name`` values:
+        ``faithfulness``, ``answer_relevancy``, ``context_precision``,
+        ``out_of_scope_correctness``.
     """
     from ragas.metrics._answer_relevance import ResponseRelevancy  # type: ignore[import]
     from ragas.metrics._context_precision import (  # type: ignore[import]
@@ -125,7 +155,12 @@ def llm_metrics() -> list[t.Any]:
     )
     from ragas.metrics._faithfulness import Faithfulness  # type: ignore[import]
 
-    return [Faithfulness(), ResponseRelevancy(), LLMContextPrecisionWithoutReference()]
+    m_faith = Faithfulness()  # name already == "faithfulness" ✓
+    m_relevancy = ResponseRelevancy()  # name already == "answer_relevancy" ✓
+    m_precision = LLMContextPrecisionWithoutReference()
+    m_precision.name = "context_precision"  # C-2: override to match YAML key
+    m_oos = OutOfScopeCorrectness()  # name already == "out_of_scope_correctness" ✓
+    return [m_faith, m_relevancy, m_precision, m_oos]
 
 
 # ── core runner ───────────────────────────────────────────────────────────────
