@@ -294,8 +294,10 @@ async def test_sse_ratelimit_returns_429():
 # ── Task 6：metadata_filter 傳遞測試 ─────────────────────────────────────────
 
 
-def _make_chat_deps(cache=None) -> ChatDeps:
+def _make_chat_deps(cache=None, tracer=None) -> ChatDeps:
     """複用既有 fake 組 ChatDeps（spawn 為 close-immediately placeholder，測試可覆寫）。"""
+    from anatomy_backend.observability.tracing import NoOpTracer
+
     return ChatDeps(
         encoder=MockEncoderClient(),
         llm=MockLLMClient(tokens=_TOKENS),
@@ -307,6 +309,7 @@ def _make_chat_deps(cache=None) -> ChatDeps:
         spawn=lambda coro: coro.close(),
         kb_version=1,
         is_disconnected=_never_disc,
+        tracer=tracer or NoOpTracer(),
     )
 
 
@@ -359,3 +362,56 @@ async def test_chat_threads_metadata_filter_into_cache():
     assert cache.set_args, "cache.set 應被呼叫（需 status=ok + all_grounded=True）"
     got_set = cache.set_args[0][3]
     assert got_set == mf, f"cache.set metadata_filter 應為 {mf}，實得 {got_set}"
+
+
+# ── Task 6：trace/span/score 錄製測試 ────────────────────────────────────────
+
+
+async def test_chat_records_trace_spans_and_citation_score():
+    """chat 正確接線 tracer.trace/span/score；原始 user_id 交給 trace（假名化由 tracer 端負責）。"""
+    from contextlib import contextmanager
+
+    from anatomy_backend.api.chat import chat_event_stream
+    from anatomy_backend.api.schemas import normalize_chat
+
+    class _RecordingTracer:
+        def __init__(self):
+            self.spans = []
+            self.scores = []
+            self.trace_user_id = "UNSET"
+
+        @contextmanager
+        def trace(self, name, *, user_id=None, metadata=None):
+            self.spans.append(("trace", name))
+            self.trace_user_id = user_id
+            yield
+
+        @contextmanager
+        def span(self, name):
+            self.spans.append(("span", name))
+            yield
+
+        def score(self, name, value, *, comment=None):
+            self.scores.append((name, value))
+
+        def flush(self):
+            pass
+
+    tracer = _RecordingTracer()
+    normalized = normalize_chat({"messages": [{"role": "user", "content": "肱二頭肌的起止點"}]})
+    deps = _make_chat_deps(tracer=tracer)
+    user = _make_user()
+    spawned = []
+    deps.spawn = lambda coro: spawned.append(coro)
+    async for _ in chat_event_stream(deps, normalized, user):
+        pass
+    for coro in spawned:
+        try:
+            await coro
+        except Exception:
+            pass
+    span_names = {n for _, n in tracer.spans}
+    assert {"encode", "retrieve", "llm"} <= span_names
+    assert any(n == "citation_verified" for n, _ in tracer.scores)
+    # chat 把原始 user_id 交給 tracer.trace（由 tracer 端假名化；chat 不負責 hash）
+    assert tracer.trace_user_id == user.user_id

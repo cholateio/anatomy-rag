@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sse_starlette import EventSourceResponse, ServerSentEvent
@@ -23,6 +23,7 @@ from anatomy_backend.api.auth import User, get_current_user
 from anatomy_backend.api.citations import build_citations_and_images, verify_citations
 from anatomy_backend.api.schemas import NormalizedChat, normalize_chat
 from anatomy_backend.cache import CacheProtocol
+from anatomy_backend.observability.tracing import NoOpTracer, Tracer
 from anatomy_backend.encoder.client import EncoderClientProtocol
 from anatomy_backend.llm.client import LLMClientProtocol
 from anatomy_backend.llm.image_routing import QueryIntent, route_images
@@ -57,6 +58,7 @@ class ChatDeps:
     kb_version: int
     is_disconnected: Callable[[], Awaitable[bool]]
     top_n: int = 3
+    tracer: Tracer = field(default_factory=NoOpTracer)
 
 
 def _intent(normalized: NormalizedChat) -> QueryIntent:
@@ -87,175 +89,186 @@ async def chat_event_stream(
       （無 sources / verification / finish）
     """
     kb = deps.kb_version
+    with deps.tracer.trace(
+        "chat", user_id=user.user_id,
+        metadata={"is_followup": normalized.is_followup, "kb_version": kb},
+    ):
+        # ── Step 1：快取（追問 MUST NOT 查/寫，DL-021）──────────────────────────
+        if not normalized.is_followup:
+            cached = await deps.cache.get(normalized.query, kb, normalized.metadata_filter)
+            if cached is not None:
+                yield ais.sse_event(ais.start_part())
+                yield ais.sse_event(ais.data_part("sources", {"sources": cached.sources}))
+                yield ais.sse_event(ais.text_start_part(_TEXT_ID))
+                yield ais.sse_event(ais.text_delta_part(_TEXT_ID, cached.answer))
+                yield ais.sse_event(ais.text_end_part(_TEXT_ID))
+                yield ais.sse_event(ais.finish_part())
+                yield ais.done_event()
+                deps.tracer.score("cache_hit", 1.0)
+                # [F1/H] spawn log，永不 await
+                deps.spawn(
+                    deps.log_query(
+                        user_id=user.user_id,
+                        query=normalized.query,
+                        conversation_id=normalized.conversation_id,
+                        cache_hit=True,
+                        status="ok",
+                    )
+                )
+                return
 
-    # ── Step 1：快取（追問 MUST NOT 查/寫，DL-021）──────────────────────────
-    if not normalized.is_followup:
-        cached = await deps.cache.get(normalized.query, kb, normalized.metadata_filter)
-        if cached is not None:
-            yield ais.sse_event(ais.start_part())
-            yield ais.sse_event(ais.data_part("sources", {"sources": cached.sources}))
-            yield ais.sse_event(ais.text_start_part(_TEXT_ID))
-            yield ais.sse_event(ais.text_delta_part(_TEXT_ID, cached.answer))
-            yield ais.sse_event(ais.text_end_part(_TEXT_ID))
-            yield ais.sse_event(ais.finish_part())
+        # ── Step 2：retrieval_q（追問串接前一問，DL-021）────────────────────────
+        retrieval_q = (
+            f"{normalized.prev_query}\n{normalized.query}"
+            if normalized.is_followup and normalized.prev_query
+            else normalized.query
+        )
+
+        # ── Step 6a：start 提前（失敗路徑也需送合規 SSE 錯誤事件，emit once here）──
+        yield ais.sse_event(ais.start_part())
+
+        # ── Step 3：encode（失敗→ encoder_error 短路，DL-012）──────────────────
+        try:
+            with deps.tracer.span("encode"):
+                query_repr = await deps.encoder.encode_query(retrieval_q)
+        except Exception:  # noqa: BLE001
+            logger.exception("encode_query 失敗")
+            yield ais.sse_event({"type": "error", "errorText": "服務暫時無法使用，請稍後再試"})
             yield ais.done_event()
-            # [F1/H] spawn log，永不 await
             deps.spawn(
                 deps.log_query(
                     user_id=user.user_id,
                     query=normalized.query,
                     conversation_id=normalized.conversation_id,
-                    cache_hit=True,
-                    status="ok",
+                    cache_hit=False,
+                    status="encoder_error",
                 )
             )
             return
 
-    # ── Step 2：retrieval_q（追問串接前一問，DL-021）────────────────────────
-    retrieval_q = (
-        f"{normalized.prev_query}\n{normalized.query}"
-        if normalized.is_followup and normalized.prev_query
-        else normalized.query
-    )
-
-    # ── Step 6a：start 提前（失敗路徑也需送合規 SSE 錯誤事件，emit once here）──
-    yield ais.sse_event(ais.start_part())
-
-    # ── Step 3：encode（失敗→ encoder_error 短路，DL-012）──────────────────
-    try:
-        query_repr = await deps.encoder.encode_query(retrieval_q)
-    except Exception:  # noqa: BLE001
-        logger.exception("encode_query 失敗")
-        yield ais.sse_event({"type": "error", "errorText": "服務暫時無法使用，請稍後再試"})
-        yield ais.done_event()
-        deps.spawn(
-            deps.log_query(
-                user_id=user.user_id,
-                query=normalized.query,
-                conversation_id=normalized.conversation_id,
-                cache_hit=False,
-                status="encoder_error",
+        # ── Steps 4/5：檢索 + 建引文（失敗→ retrieval_error 短路；連線於 retrieve_fn 內歸還）
+        try:
+            with deps.tracer.span("retrieve"):
+                results = await deps.retrieve_fn(
+                    retrieval_q, query_repr, normalized.metadata_filter, kb, deps.top_n
+                )
+                routing = route_images(results, _intent(normalized))
+                citations, images = await build_citations_and_images(
+                    results, routing, sign_url=deps.sign_url, fetch_bytes=deps.fetch_bytes
+                )
+        except Exception:  # noqa: BLE001
+            logger.exception("檢索或引文建立失敗")
+            yield ais.sse_event({"type": "error", "errorText": "服務暫時無法使用，請稍後再試"})
+            yield ais.done_event()
+            deps.spawn(
+                deps.log_query(
+                    user_id=user.user_id,
+                    query=normalized.query,
+                    conversation_id=normalized.conversation_id,
+                    cache_hit=False,
+                    status="retrieval_error",
+                )
             )
-        )
-        return
+            return
 
-    # ── Steps 4/5：檢索 + 建引文（失敗→ retrieval_error 短路；連線於 retrieve_fn 內歸還）
-    try:
-        results = await deps.retrieve_fn(
-            retrieval_q, query_repr, normalized.metadata_filter, kb, deps.top_n
+        sources_payload = [c.model_dump() for c in citations]
+
+        # ── Step 6b：sources（MUST 在第一個 text-delta 前）────────────────────
+        yield ais.sse_event(ais.data_part("sources", {"sources": sources_payload}))
+
+        # ── Step 7：串流 LLM（user_id 入 forbidden_identifiers；連線此時已歸還）──
+        text_context = "\n\n".join(r.docling_md for r in results)
+        system = get_system_prompt()
+        user_text = build_user_text(
+            text_context,
+            normalized.query,
+            normalized.prev_query if normalized.is_followup else None,
         )
-        routing = route_images(results, _intent(normalized))
-        citations, images = await build_citations_and_images(
-            results, routing, sign_url=deps.sign_url, fetch_bytes=deps.fetch_bytes
-        )
-    except Exception:  # noqa: BLE001
-        logger.exception("檢索或引文建立失敗")
-        yield ais.sse_event({"type": "error", "errorText": "服務暫時無法使用，請稍後再試"})
-        yield ais.done_event()
-        deps.spawn(
-            deps.log_query(
-                user_id=user.user_id,
-                query=normalized.query,
-                conversation_id=normalized.conversation_id,
-                cache_hit=False,
-                status="retrieval_error",
+        # [F1/H] user_id only（conversation_id 非 PII，不放入）
+        forbidden = frozenset({user.user_id})
+        answer_parts: list[str] = []
+        yield ais.sse_event(ais.text_start_part(_TEXT_ID))
+        status = "ok"
+        try:
+            with deps.tracer.span("llm"):
+                async for delta in deps.llm.stream_complete(
+                    system,
+                    user_text,
+                    images,
+                    image_detail=routing.detail,
+                    forbidden_identifiers=forbidden,
+                ):
+                    if await deps.is_disconnected():
+                        status = "cancelled"
+                        break
+                    answer_parts.append(delta)
+                    yield ais.sse_event(ais.text_delta_part(_TEXT_ID, delta))
+        except Exception:  # noqa: BLE001  [F8/M] LLM 串流失敗契約
+            logger.exception("LLM 串流失敗")
+            yield ais.sse_event({"type": "error", "errorText": "生成失敗，請重試"})
+            status = "llm_error"
+            yield ais.sse_event(ais.text_end_part(_TEXT_ID))
+            yield ais.done_event()
+            # [F1/H] spawn log，MUST NOT emit finish/verification
+            deps.spawn(
+                deps.log_query(
+                    user_id=user.user_id,
+                    query=normalized.query,
+                    conversation_id=normalized.conversation_id,
+                    cache_hit=False,
+                    status="llm_error",
+                    model_used=None,
+                )
             )
-        )
-        return
+            return  # 跳過 verification 和 finish
 
-    sources_payload = [c.model_dump() for c in citations]
-
-    # ── Step 6b：sources（MUST 在第一個 text-delta 前）────────────────────
-    yield ais.sse_event(ais.data_part("sources", {"sources": sources_payload}))
-
-    # ── Step 7：串流 LLM（user_id 入 forbidden_identifiers；連線此時已歸還）──
-    text_context = "\n\n".join(r.docling_md for r in results)
-    system = get_system_prompt()
-    user_text = build_user_text(
-        text_context,
-        normalized.query,
-        normalized.prev_query if normalized.is_followup else None,
-    )
-    # [F1/H] user_id only（conversation_id 非 PII，不放入）
-    forbidden = frozenset({user.user_id})
-    answer_parts: list[str] = []
-    yield ais.sse_event(ais.text_start_part(_TEXT_ID))
-    status = "ok"
-    try:
-        async for delta in deps.llm.stream_complete(
-            system,
-            user_text,
-            images,
-            image_detail=routing.detail,
-            forbidden_identifiers=forbidden,
-        ):
-            if await deps.is_disconnected():
-                status = "cancelled"
-                break
-            answer_parts.append(delta)
-            yield ais.sse_event(ais.text_delta_part(_TEXT_ID, delta))
-    except Exception:  # noqa: BLE001  [F8/M] LLM 串流失敗契約
-        logger.exception("LLM 串流失敗")
-        yield ais.sse_event({"type": "error", "errorText": "生成失敗，請重試"})
-        status = "llm_error"
         yield ais.sse_event(ais.text_end_part(_TEXT_ID))
+
+        # ── Step 8：引文驗證 + data-verification（前端 banner / 快取守門）────────
+        answer = "".join(answer_parts)
+        verification = verify_citations(answer, results)
+        yield ais.sse_event(
+            ais.data_part(
+                "verification",
+                {
+                    "verified": verification.all_grounded,
+                    "has_citations": verification.has_citations,
+                    "unverified": verification.unverified,
+                },
+            )
+        )
+        deps.tracer.score("cache_hit", 0.0)
+        deps.tracer.score(
+            "citation_verified", 1.0 if verification.all_grounded else 0.0
+        )
+
+        # ── Step 9：finish + [DONE]──────────────────────────────────────────────
+        yield ais.sse_event(ais.finish_part())
         yield ais.done_event()
-        # [F1/H] spawn log，MUST NOT emit finish/verification
+
+        # [F1/H] spawn 副作用，永不 await（SSE 已送完）
         deps.spawn(
             deps.log_query(
                 user_id=user.user_id,
                 query=normalized.query,
                 conversation_id=normalized.conversation_id,
                 cache_hit=False,
-                status="llm_error",
+                status=status,
                 model_used=None,
             )
         )
-        return  # 跳過 verification 和 finish
-
-    yield ais.sse_event(ais.text_end_part(_TEXT_ID))
-
-    # ── Step 8：引文驗證 + data-verification（前端 banner / 快取守門）────────
-    answer = "".join(answer_parts)
-    verification = verify_citations(answer, results)
-    yield ais.sse_event(
-        ais.data_part(
-            "verification",
-            {
-                "verified": verification.all_grounded,
-                "has_citations": verification.has_citations,
-                "unverified": verification.unverified,
-            },
-        )
-    )
-
-    # ── Step 9：finish + [DONE]──────────────────────────────────────────────
-    yield ais.sse_event(ais.finish_part())
-    yield ais.done_event()
-
-    # [F1/H] spawn 副作用，永不 await（SSE 已送完）
-    deps.spawn(
-        deps.log_query(
-            user_id=user.user_id,
-            query=normalized.query,
-            conversation_id=normalized.conversation_id,
-            cache_hit=False,
-            status=status,
-            model_used=None,
-        )
-    )
-    # [F2/H] cache.set 僅在非追問 + ok + all_grounded（防快取偽造引文答案）
-    # 已知限制（Codex 終審 P2#1，待真實 S3 接線處理）：sources_payload.image_url 為 sign_url 產物。
-    # 真實 presigned S3 URL 會過期，而快取 TTL 達 14 天，命中可能回到已過期的圖片 URL。真實 S3 接線
-    # 時 MUST 改存穩定 page_image_uri 並於命中時重簽（或令 cache TTL ≤ presign 壽命）。目前 mock
-    # 的 sign_url 不過期、真實模式尚 raise NotImplementedError（S3 延後），故此路徑現無實際影響。
-    if (not normalized.is_followup) and status == "ok" and verification.all_grounded:
-        deps.spawn(
-            deps.cache.set(
-                normalized.query, answer, sources_payload, kb,
-                verified=True, metadata_filter=normalized.metadata_filter,
+        # [F2/H] cache.set 僅在非追問 + ok + all_grounded（防快取偽造引文答案）
+        # 已知限制（Codex 終審 P2#1，待真實 S3 接線處理）：sources_payload.image_url 為 sign_url 產物。
+        # 真實 presigned S3 URL 會過期，而快取 TTL 達 14 天，命中可能回到已過期的圖片 URL。真實 S3 接線
+        # 時 MUST 改存穩定 page_image_uri 並於命中時重簽（或令 cache TTL ≤ presign 壽命）。目前 mock
+        # 的 sign_url 不過期、真實模式尚 raise NotImplementedError（S3 延後），故此路徑現無實際影響。
+        if (not normalized.is_followup) and status == "ok" and verification.all_grounded:
+            deps.spawn(
+                deps.cache.set(
+                    normalized.query, answer, sources_payload, kb,
+                    verified=True, metadata_filter=normalized.metadata_filter,
+                )
             )
-        )
 
 
 @router.post("/chat")
