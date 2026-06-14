@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 260" role="img" aria-label="教科書頁面佔位圖">
+  <!-- Page background with warm tint -->
+  <rect width="200" height="260" fill="#f5f0ea" rx="4"/>
+
+  <!-- Top rule and header area -->
+  <line x1="16" y1="30" x2="184" y2="30" stroke="#c5b49e" stroke-width="0.8"/>
+  <line x1="16" y1="32.5" x2="184" y2="32.5" stroke="#c5b49e" stroke-width="0.3"/>
+
+  <!-- Chapter / title placeholder bars -->
+  <rect x="16" y="14" width="80" height="7" rx="2" fill="#c5b49e" opacity="0.5"/>
+  <rect x="152" y="14" width="32" height="7" rx="2" fill="#c5b49e" opacity="0.35"/>
+
+  <!-- Illustration placeholder: anatomical cross-section circle -->
+  <circle cx="100" cy="108" r="54" fill="#ede6da" stroke="#b8a688" stroke-width="1"/>
+  <circle cx="100" cy="108" r="38" fill="none" stroke="#b8a688" stroke-width="0.7" stroke-dasharray="3 3"/>
+  <circle cx="100" cy="108" r="20" fill="#e0d5c5" stroke="#b8a688" stroke-width="0.7"/>
+
+  <!-- Cross lines inside circle (anatomical label guides) -->
+  <line x1="58" y1="108" x2="142" y2="108" stroke="#b8a688" stroke-width="0.5" opacity="0.6"/>
+  <line x1="100" y1="66" x2="100" y2="150" stroke="#b8a688" stroke-width="0.5" opacity="0.6"/>
+
+  <!-- Corner tick marks (measurement-style) -->
+  <line x1="51" y1="88" x2="54" y2="88" stroke="#c5b49e" stroke-width="1"/>
+  <line x1="51" y1="128" x2="54" y2="128" stroke="#c5b49e" stroke-width="1"/>
+  <line x1="146" y1="88" x2="149" y2="88" stroke="#c5b49e" stroke-width="1"/>
+  <line x1="146" y1="128" x2="149" y2="128" stroke="#c5b49e" stroke-width="1"/>
+
+  <!-- Small annotation dot + line -->
+  <line x1="138" y1="90" x2="158" y2="80" stroke="#c5b49e" stroke-width="0.7"/>
+  <circle cx="138" cy="90" r="2" fill="#c5b49e"/>
+  <rect x="160" y="76" width="22" height="4" rx="1" fill="#c5b49e" opacity="0.4"/>
+
+  <!-- Text lines below illustration -->
+  <rect x="16" y="178" width="168" height="5.5" rx="1.5" fill="#c5b49e" opacity="0.4"/>
+  <rect x="16" y="189" width="148" height="5.5" rx="1.5" fill="#c5b49e" opacity="0.35"/>
+  <rect x="16" y="200" width="158" height="5.5" rx="1.5" fill="#c5b49e" opacity="0.3"/>
+  <rect x="16" y="211" width="120" height="5.5" rx="1.5" fill="#c5b49e" opacity="0.25"/>
+
+  <!-- Footer rule -->
+  <line x1="16" y1="232" x2="184" y2="232" stroke="#c5b49e" stroke-width="0.5"/>
+
+  <!-- Page number placeholder -->
+  <rect x="88" y="240" width="24" height="5" rx="1" fill="#c5b49e" opacity="0.3"/>
+</svg>

@@ -13,6 +13,7 @@
   "dependencies": {
     "@ai-sdk/react": "3.0.199",
     "@tailwindcss/postcss": "^4.3.1",
+    "@testing-library/dom": "^10.4.1",
     "ai": "6.0.197",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
