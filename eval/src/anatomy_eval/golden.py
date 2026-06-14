@@ -11,6 +11,15 @@ ALLOWED_CATEGORIES = {
     "text_only", "figure_id", "cross_page", "clinical_correlation", "out_of_scope",
 }
 
+# §7.2 各類別最少題數（total ≥110 且各類達最低為 ready）
+CATEGORY_MINIMUMS: dict[str, int] = {
+    "text_only": 30,
+    "figure_id": 30,
+    "cross_page": 20,
+    "clinical_correlation": 20,
+    "out_of_scope": 10,
+}
+
 _KNOWN_FIELDS = {"id", "category", "query", "expected_pages", "expected_concepts",
                  "metadata_filter", "expected_response_type"}
 
@@ -30,6 +39,56 @@ class GoldenQA:
     __hash__ = None  # type: ignore[assignment]
 
 
+def parse_golden_row(raw: dict, lineno: int) -> "GoldenQA":
+    """單列 dict → 驗證 → GoldenQA。含所有 schema 檢查（供 load_golden 及 regression 複用）。
+
+    注意：不做跨列去重（dup-id），那部分留給 load_golden 的呼叫端。
+    lineno 僅用於錯誤訊息定位；記憶體內驗證可傳 0。
+    """
+    if not isinstance(raw, dict):
+        raise ValueError(f"line {lineno}: 每行必須是 JSON 物件，收到 {type(raw).__name__}")
+    cat = raw.get("category")
+    if cat == "should_refuse":
+        raise ValueError(f"line {lineno}: 黃金題庫不得有 should_refuse 類別（§7.2）")
+    for req in ("id", "category", "query"):
+        if not isinstance(raw.get(req), str) or not raw.get(req):
+            raise ValueError(f"line {lineno}: 缺少或非字串的必要欄位 {req!r}")
+    unknown = set(raw) - _KNOWN_FIELDS
+    if unknown:
+        raise ValueError(f"line {lineno}: 未知欄位 {sorted(unknown)}（疑似拼字錯誤）")
+    if cat not in ALLOWED_CATEGORIES:
+        raise ValueError(f"line {lineno}: 未知 category {cat!r}")
+    for field_name in ("expected_pages", "expected_concepts"):
+        val = raw.get(field_name)
+        if val is None and field_name in raw:
+            raise ValueError(f"line {lineno}: {field_name} 不得為 null")
+        if val is not None:
+            if not isinstance(val, list) or not all(isinstance(s, str) and s for s in val):
+                raise ValueError(f"line {lineno}: {field_name} 必須是字串清單")
+    mf = raw.get("metadata_filter")
+    if mf is not None and not isinstance(mf, dict):
+        raise ValueError(f"line {lineno}: metadata_filter 必須是物件或 null")
+    item = GoldenQA(
+        id=raw["id"],
+        category=cat,
+        query=raw["query"],
+        expected_pages=tuple(raw.get("expected_pages", [])),
+        expected_concepts=tuple(raw.get("expected_concepts", [])),
+        metadata_filter=raw.get("metadata_filter"),
+        expected_response_type=raw.get("expected_response_type"),
+    )
+    if cat == "out_of_scope":
+        if item.expected_pages:
+            raise ValueError(f"line {lineno}: out_of_scope 不得帶 expected_pages")
+        if item.expected_response_type != "教材中查無此項":
+            raise ValueError(
+                f"line {lineno}: out_of_scope 須 expected_response_type=教材中查無此項"
+            )
+    elif not item.expected_pages:
+        raise ValueError(f"line {lineno}: {cat} 題必須有 expected_pages")
+    return item
+
+
 def load_golden(path: str | Path) -> list[GoldenQA]:
     items: list[GoldenQA] = []
     seen_ids: set[str] = set()
@@ -40,49 +99,35 @@ def load_golden(path: str | Path) -> list[GoldenQA]:
             raw = json.loads(line)
         except json.JSONDecodeError as e:
             raise ValueError(f"line {lineno}: 無效 JSON——{e}") from e
-        if not isinstance(raw, dict):
-            raise ValueError(f"line {lineno}: 每行必須是 JSON 物件，收到 {type(raw).__name__}")
-        cat = raw.get("category")
-        if cat == "should_refuse":
-            raise ValueError(f"line {lineno}: 黃金題庫不得有 should_refuse 類別（§7.2）")
-        for req in ("id", "category", "query"):
-            if not isinstance(raw.get(req), str) or not raw.get(req):
-                raise ValueError(f"line {lineno}: 缺少或非字串的必要欄位 {req!r}")
-        unknown = set(raw) - _KNOWN_FIELDS
-        if unknown:
-            raise ValueError(f"line {lineno}: 未知欄位 {sorted(unknown)}（疑似拼字錯誤）")
-        if cat not in ALLOWED_CATEGORIES:
-            raise ValueError(f"line {lineno}: 未知 category {cat!r}")
-        if raw["id"] in seen_ids:
-            raise ValueError(f"line {lineno}: 重複 id {raw['id']!r}")
-        seen_ids.add(raw["id"])
-        for field_name in ("expected_pages", "expected_concepts"):
-            val = raw.get(field_name)
-            if val is None and field_name in raw:
-                raise ValueError(f"line {lineno}: {field_name} 不得為 null")
-            if val is not None:
-                if not isinstance(val, list) or not all(isinstance(s, str) and s for s in val):
-                    raise ValueError(f"line {lineno}: {field_name} 必須是字串清單")
-        mf = raw.get("metadata_filter")
-        if mf is not None and not isinstance(mf, dict):
-            raise ValueError(f"line {lineno}: metadata_filter 必須是物件或 null")
-        item = GoldenQA(
-            id=raw["id"],
-            category=cat,
-            query=raw["query"],
-            expected_pages=tuple(raw.get("expected_pages", [])),
-            expected_concepts=tuple(raw.get("expected_concepts", [])),
-            metadata_filter=raw.get("metadata_filter"),
-            expected_response_type=raw.get("expected_response_type"),
-        )
-        if cat == "out_of_scope":
-            if item.expected_pages:
-                raise ValueError(f"line {lineno}: out_of_scope 不得帶 expected_pages")
-            if item.expected_response_type != "教材中查無此項":
-                raise ValueError(
-                    f"line {lineno}: out_of_scope 須 expected_response_type=教材中查無此項"
-                )
-        elif not item.expected_pages:
-            raise ValueError(f"line {lineno}: {cat} 題必須有 expected_pages")
+        item = parse_golden_row(raw, lineno)
+        if item.id in seen_ids:
+            raise ValueError(f"line {lineno}: 重複 id {item.id!r}")
+        seen_ids.add(item.id)
         items.append(item)
     return items
+
+
+def golden_readiness(items: list["GoldenQA"]) -> dict:
+    """檢查黃金題庫是否達 §7.2 就緒標準（total ≥110 且各類達 CATEGORY_MINIMUMS）。
+
+    回傳 dict：
+    - total: 總題數
+    - by_class: 各類別題數
+    - shortfall: 各類別不足數（0 表示已達標）
+    - ready: bool（total ≥110 且所有 shortfall=0）
+    """
+    by_class: dict[str, int] = {}
+    for item in items:
+        by_class[item.category] = by_class.get(item.category, 0) + 1
+    shortfall: dict[str, int] = {}
+    for cat, minimum in CATEGORY_MINIMUMS.items():
+        have = by_class.get(cat, 0)
+        shortfall[cat] = max(0, minimum - have)
+    total = sum(by_class.values())
+    ready = total >= 110 and all(v == 0 for v in shortfall.values())
+    return {
+        "total": total,
+        "by_class": by_class,
+        "shortfall": shortfall,
+        "ready": ready,
+    }

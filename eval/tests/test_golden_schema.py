@@ -3,7 +3,42 @@ import json
 from pathlib import Path
 
 import pytest
-from anatomy_eval.golden import ALLOWED_CATEGORIES, GoldenQA, load_golden
+from anatomy_eval.golden import (
+    ALLOWED_CATEGORIES,
+    CATEGORY_MINIMUMS,
+    GoldenQA,
+    golden_readiness,
+    load_golden,
+    parse_golden_row,
+)
+
+# ─── parse_golden_row + golden_readiness 新測試（Task 1.1）────────────────
+
+def test_parse_golden_row_valid():
+    qa = parse_golden_row(
+        {"id": "x", "category": "text_only", "query": "q", "expected_pages": ["gray42:1"]}, 1
+    )
+    assert isinstance(qa, GoldenQA) and qa.id == "x"
+
+
+def test_parse_golden_row_rejects_should_refuse():
+    with pytest.raises(ValueError):
+        parse_golden_row({"id": "x", "category": "should_refuse", "query": "q"}, 1)
+
+
+def test_category_minimums():
+    assert CATEGORY_MINIMUMS["text_only"] == 30 and sum(CATEGORY_MINIMUMS.values()) == 110
+
+
+def test_golden_readiness_shortfall():
+    items = [
+        GoldenQA(id=f"t{i}", category="text_only", query="q", expected_pages=("gray42:1",))
+        for i in range(3)
+    ]
+    rep = golden_readiness(items)
+    assert rep["ready"] is False
+    assert rep["shortfall"]["text_only"] == 27
+    assert rep["shortfall"]["out_of_scope"] == 10
 
 SEED = Path(__file__).resolve().parents[2] / "tests" / "golden_qa.seed.jsonl"
 
