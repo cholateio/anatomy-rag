@@ -107,9 +107,26 @@ describe("MessageBubble — assistant", () => {
     expect(screen.queryByText(/未驗證/)).not.toBeInTheDocument();
   });
 
-  it("shows streaming cursor during streaming status", () => {
-    render(<MessageBubble message={makeAssistantMsg()} status="streaming" />);
+  it("shows streaming cursor when isStreaming=true (M7 — explicit prop)", () => {
+    render(<MessageBubble message={makeAssistantMsg()} status="ready" isStreaming={true} />);
     expect(screen.getByTestId("streaming-cursor")).toBeInTheDocument();
+  });
+
+  it("does NOT show streaming cursor when isStreaming=false even if status=streaming (M7)", () => {
+    render(<MessageBubble message={makeAssistantMsg()} status="streaming" isStreaming={false} />);
+    expect(screen.queryByTestId("streaming-cursor")).not.toBeInTheDocument();
+  });
+
+  it("still shows citation empty-state and watermark when no data-sources part (C1)", () => {
+    const noSources: AnatomyUIMessage = {
+      id: "00000000-0000-0000-0000-000000000099",
+      role: "assistant",
+      parts: [{ type: "text" as never, text: "some answer" as never }],
+      metadata: undefined as never,
+    } as AnatomyUIMessage;
+    render(<MessageBubble message={noSources} status="ready" />);
+    expect(screen.getByText(/本回答未引用教科書頁面/)).toBeInTheDocument();
+    expect(screen.getByText(/教育用途，內容基於教科書/)).toBeInTheDocument();
   });
 });
 

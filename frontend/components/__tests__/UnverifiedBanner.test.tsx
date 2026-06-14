@@ -25,13 +25,14 @@ describe("UnverifiedBanner", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it("renders nothing when has_citations=false", () => {
+  it("shows a softer notice (role=alert) when !verified and !has_citations (H5)", () => {
     const data: VerificationData = {
       verified: false,
       has_citations: false,
       unverified: [],
     };
-    const { container } = render(<UnverifiedBanner data={data} />);
-    expect(container).toBeEmptyDOMElement();
+    render(<UnverifiedBanner data={data} />);
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(screen.getByRole("alert").textContent).toMatch(/請以教材核對/);
   });
 });

@@ -19,11 +19,21 @@ interface MessageListProps {
  *
  * - Empty → shows EmptyState with example prompts.
  * - Non-empty → maps each message to MessageBubble.
+ * - H4: innerRef is attached to the inner growing content div so
+ *   ResizeObserver fires on token appends, not just container resize.
+ * - M7: only the LAST assistant message receives isStreaming=true so the
+ *   streaming cursor never appears on earlier turns during a follow-up.
  * - When the user scrolls up, a 「回到最新」 FAB appears in the bottom-right;
  *   clicking it snaps back and re-enables auto-scroll.
  */
 export function MessageList({ messages, status, onPickExample, className }: MessageListProps) {
-  const { containerRef, showJumpToLatest, jumpToLatest } = useStickToBottom();
+  const { containerRef, innerRef, showJumpToLatest, jumpToLatest } = useStickToBottom();
+
+  // M7: find the index of the last assistant message to target the cursor
+  const lastAssistantIndex = messages.reduce<number>(
+    (lastIdx, m, idx) => (m.role === "assistant" ? idx : lastIdx),
+    -1,
+  );
 
   return (
     <div className={cn("relative flex-1 overflow-hidden", className)}>
@@ -38,9 +48,16 @@ export function MessageList({ messages, status, onPickExample, className }: Mess
             className="my-auto"
           />
         ) : (
-          <div className="flex flex-col divide-y divide-border/20 py-2">
-            {messages.map((m) => (
-              <MessageBubble key={m.id} message={m} status={status} />
+          /* H4: innerRef on this div — ResizeObserver watches the growing content */
+          <div ref={innerRef} className="flex flex-col divide-y divide-border/20 py-2">
+            {messages.map((m, idx) => (
+              <MessageBubble
+                key={m.id}
+                message={m}
+                status={status}
+                // M7: only the last assistant message is "streaming"
+                isStreaming={status === "streaming" && idx === lastAssistantIndex}
+              />
             ))}
           </div>
         )}

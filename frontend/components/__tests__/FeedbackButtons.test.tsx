@@ -63,6 +63,29 @@ describe("FeedbackButtons", () => {
     expect(screen.queryByTitle("有幫助")).not.toBeInTheDocument();
   });
 
+  it("rapid double-click 👍 calls postFeedback exactly once (M6 — no double-submit)", async () => {
+    render(<FeedbackButtons messageId={FIXED_TURN} />);
+    const btn = screen.getByTitle("有幫助");
+    // Rapid double-click before the first promise resolves
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    await waitFor(() => {
+      // Only one call even on rapid double-click
+      expect(postFeedback).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("shows 繁中 error notice and allows retry when postFeedback rejects (M6 — error handling)", async () => {
+    (postFeedback as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("網路錯誤"));
+    render(<FeedbackButtons messageId={FIXED_TURN} />);
+    fireEvent.click(screen.getByTitle("有幫助"));
+    await waitFor(() => {
+      expect(screen.getByText(/提交回饋失敗，請重試/)).toBeInTheDocument();
+    });
+    // Retry buttons should still be present (not locked as 已收到回饋)
+    expect(screen.getByTitle("有幫助")).toBeInTheDocument();
+  });
+
   it("does NOT show first-downvote hint on second downvote (after localStorage cleared but hint already marked)", () => {
     // First render: triggers hint and marks it
     const { unmount } = render(<FeedbackButtons messageId={FIXED_TURN} />);

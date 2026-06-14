@@ -1,13 +1,8 @@
 /** @type {import('next').NextConfig} */
-const backend = process.env.BACKEND_ORIGIN ?? "http://localhost:8000";
 const nextConfig = {
   output: "standalone",
-  async rewrites() {
-    return [
-      { source: "/chat", destination: `${backend}/chat` },
-      { source: "/feedback", destination: `${backend}/feedback` },
-      { source: "/warmup", destination: `${backend}/warmup` },
-    ];
-  },
+  // H3: backend proxy is handled by app/chat/route.ts, app/feedback/route.ts,
+  // and app/warmup/route.ts so that BACKEND_ORIGIN is read at REQUEST time
+  // (not baked in at build time).  Remove rewrites entirely.
 };
 export default nextConfig;

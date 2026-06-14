@@ -1,4 +1,4 @@
-import { AlertTriangleIcon } from "lucide-react";
+import { AlertTriangleIcon, InfoIcon } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { cn } from "@/lib/utils";
 import type { VerificationData } from "@/lib/types";
@@ -9,12 +9,41 @@ interface UnverifiedBannerProps {
 }
 
 /**
- * 引文未驗證提示 (D-N)
- * 僅在 verified=false 且確實有引文時顯示；verified=true 或無引文則靜默。
+ * 引文驗證提示 (H5 / §6.7)
+ *
+ * - verified=true              → null (no banner)
+ * - !verified && has_citations → amber 警告：列出未驗證引文標記
+ * - !verified && !has_citations→ blue 提示：本回答未附可驗證引文，請以教材核對
+ *
+ * Both non-verified variants render an accessible role="alert" (via shadcn Alert).
  */
 export function UnverifiedBanner({ data, className }: UnverifiedBannerProps) {
-  if (data.verified || !data.has_citations) return null;
+  if (data.verified) return null;
 
+  if (!data.has_citations) {
+    // Softer informational notice — no citations to verify, but flag the gap
+    return (
+      <Alert
+        className={cn(
+          "border-blue-400/30 bg-blue-50/50 text-blue-900",
+          "dark:border-blue-500/20 dark:bg-blue-950/20 dark:text-blue-200",
+          className,
+        )}
+      >
+        <InfoIcon className="size-4 text-blue-500 dark:text-blue-400" />
+        <AlertTitle className="text-sm font-medium">
+          引文未附
+        </AlertTitle>
+        <AlertDescription>
+          <p className="text-xs leading-relaxed">
+            本回答未附可驗證的教科書引文，請以教材核對
+          </p>
+        </AlertDescription>
+      </Alert>
+    );
+  }
+
+  // !verified && has_citations → warn about specific unverified citation markers
   return (
     <Alert
       className={cn(

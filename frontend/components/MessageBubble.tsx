@@ -10,6 +10,12 @@ type Status = "submitted" | "streaming" | "ready" | "error";
 interface MessageBubbleProps {
   message: AnatomyUIMessage;
   status: Status;
+  /**
+   * M7 — only the last assistant message in a streaming response should show
+   * the streaming cursor.  MessageList computes this per-bubble and passes it
+   * explicitly so that earlier messages are never wrongly decorated.
+   */
+  isStreaming?: boolean;
 }
 
 /**
@@ -17,7 +23,7 @@ interface MessageBubbleProps {
  *
  * **assistant** — vertical stack: answer text → CitationPanel → UnverifiedBanner
  *                 → (FeedbackButtons | Watermark) row.  Streaming cursor appended
- *                 to text when status === "streaming".
+ *                 to text when isStreaming === true.
  * **user**       — plain text bubble, right-aligned; no citations / feedback / watermark.
  *
  * Parts are extracted from `message.parts` per the AI SDK UI-message-stream protocol:
@@ -25,11 +31,11 @@ interface MessageBubbleProps {
  *   • `{ type: "data-sources",     data: SourcesData }`
  *   • `{ type: "data-verification",data: VerificationData }`
  */
-export function MessageBubble({ message, status }: MessageBubbleProps) {
+export function MessageBubble({ message, status, isStreaming }: MessageBubbleProps) {
   if (message.role === "user") {
     return <UserBubble message={message} />;
   }
-  return <AssistantBubble message={message} status={status} />;
+  return <AssistantBubble message={message} status={status} isStreaming={isStreaming} />;
 }
 
 // ─── User bubble ────────────────────────────────────────────────────────────
@@ -54,11 +60,22 @@ function UserBubble({ message }: { message: AnatomyUIMessage }) {
 
 // ─── Assistant bubble ────────────────────────────────────────────────────────
 
-function AssistantBubble({ message, status }: { message: AnatomyUIMessage; status: Status }) {
+function AssistantBubble({
+  message,
+  status: _status,
+  isStreaming,
+}: {
+  message: AnatomyUIMessage;
+  status: Status;
+  isStreaming?: boolean;
+}) {
   const text = extractText(message);
   const sourcesData = extractDataPart<SourcesData>(message, "data-sources");
   const verificationData = extractDataPart<VerificationData>(message, "data-verification");
-  const isStreaming = status === "streaming";
+
+  // M7: use explicit isStreaming prop for cursor; never infer from global status
+  // so that earlier messages in a multi-turn conversation stay cursor-free.
+  const showCursor = isStreaming === true;
 
   return (
     <div
@@ -77,7 +94,7 @@ function AssistantBubble({ message, status }: { message: AnatomyUIMessage; statu
       >
         {text}
         {/* Streaming cursor — visual only, hidden from AT */}
-        {isStreaming && (
+        {showCursor && (
           <span
             data-testid="streaming-cursor"
             aria-hidden="true"
@@ -88,12 +105,10 @@ function AssistantBubble({ message, status }: { message: AnatomyUIMessage; statu
         )}
       </div>
 
-      {/* Citation panel ───────────────────────────────────────────────────── */}
-      {sourcesData && (
-        <div className="mb-3">
-          <CitationPanel data={sourcesData} />
-        </div>
-      )}
+      {/* Citation panel — §6.7: ALWAYS rendered; shows empty-state when no sources ── */}
+      <div className="mb-3">
+        <CitationPanel data={sourcesData ?? { sources: [] }} />
+      </div>
 
       {/* Unverified banner ────────────────────────────────────────────────── */}
       {verificationData && (

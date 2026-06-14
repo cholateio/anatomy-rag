@@ -8,14 +8,28 @@ export const STICK_THRESHOLD = 48;
 /**
  * Auto-scroll hook for streaming chat lists.
  *
- * - Attaches a scroll listener to the returned `containerRef`.
- * - When the user is within `STICK_THRESHOLD` px of the bottom, the container
- *   auto-scrolls as new content arrives (via ResizeObserver).
+ * - Attaches a scroll listener to `containerRef` (the outer scrollable div).
+ * - H4 fix: attaches ResizeObserver to `innerRef` (the INNER growing content
+ *   div) rather than the outer container.  The outer container's box size does
+ *   not change when content is appended — only the inner div's height grows —
+ *   so watching the outer box never fires during streaming.
+ * - When the user is within `STICK_THRESHOLD` px of the bottom, auto-scrolls
+ *   the container whenever the inner content grows.
  * - When the user scrolls up, `showJumpToLatest` becomes `true` and
  *   `jumpToLatest()` lets them snap back.
+ *
+ * Usage in MessageList:
+ *   const { containerRef, innerRef, ... } = useStickToBottom();
+ *   <div ref={containerRef} className="overflow-y-auto ...">
+ *     <div ref={innerRef}>  ← inner growing content
+ *       {messages.map(...)}
+ *     </div>
+ *   </div>
  */
 export function useStickToBottom() {
   const containerRef = useRef<HTMLDivElement>(null);
+  /** Attach to the growing INNER content div (H4). */
+  const innerRef = useRef<HTMLDivElement>(null);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   // Track stick state without triggering re-renders on every scroll pixel
   const isStuck = useRef(true);
@@ -42,19 +56,25 @@ export function useStickToBottom() {
     return () => el.removeEventListener("scroll", handleScroll);
   }, []);
 
-  // When content height grows (new streaming tokens), auto-scroll if stuck
+  // H4: Observe the INNER growing content element (not the outer container).
+  // The outer scroll container's own size is fixed; only the inner div grows
+  // as streaming tokens arrive.  Falls back to the container itself when no
+  // innerRef is provided (e.g. in test harnesses that only use containerRef).
   useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
+    const container = containerRef.current;
+    const target = innerRef.current ?? containerRef.current;
+    if (!container || !target) return;
+
     const tryScroll = () => {
       if (isStuck.current) {
-        el.scrollTop = el.scrollHeight - el.clientHeight;
+        container.scrollTop = container.scrollHeight - container.clientHeight;
       }
     };
+
     const ro = new ResizeObserver(tryScroll);
-    ro.observe(el);
+    ro.observe(target);
     return () => ro.disconnect();
   }, []);
 
-  return { containerRef, showJumpToLatest, jumpToLatest };
+  return { containerRef, innerRef, showJumpToLatest, jumpToLatest };
 }

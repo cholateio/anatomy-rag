@@ -57,6 +57,34 @@ afterEach(() => {
 
 describe("ChatPanel integration", () => {
   /**
+   * L8 — outgoing request carries conversation_id and omits credentials (multi-chunk stream).
+   */
+  it("[L8] request body has conversation_id and fetch uses credentials:omit", async () => {
+    const mockFetch = vi.fn().mockResolvedValue(uiMessageStreamResponse());
+    vi.stubGlobal("fetch", mockFetch);
+
+    render(<ChatPanel />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "肱二頭肌" } });
+    fireEvent.click(screen.getByRole("button", { name: "送出" }));
+
+    // Wait for stream to complete
+    await waitFor(
+      () => expect(screen.getByText(/起於喙突/)).toBeInTheDocument(),
+      { timeout: 5000 },
+    );
+
+    expect(mockFetch).toHaveBeenCalled();
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+
+    // conversation_id must be in the JSON body
+    const body = JSON.parse(init.body as string) as Record<string, unknown>;
+    expect(body).toHaveProperty("conversation_id");
+
+    // Credentials must be omitted (C2 transport fix)
+    expect(init.credentials).toBe("omit");
+  });
+
+  /**
    * Test 1 — happy-path full stream.
    * Sends a question, awaits the SSE response, asserts rendered text + citations + watermark.
    */

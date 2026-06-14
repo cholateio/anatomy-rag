@@ -12,7 +12,14 @@ interface CitationPanelProps {
  * 空 sources 時靜默不渲染；有 sources 則顯示計數標題 + 逐張卡片。
  */
 export function CitationPanel({ data, className }: CitationPanelProps) {
-  if (!data.sources || data.sources.length === 0) return null;
+  if (!data.sources || data.sources.length === 0) {
+    // §6.7 強制引文清單: show explicit empty-state rather than silently rendering nothing
+    return (
+      <p className="text-xs italic text-muted-foreground">
+        本回答未引用教科書頁面
+      </p>
+    );
+  }
 
   return (
     <section aria-label="引用來源" className={cn("space-y-3", className)}>

@@ -27,8 +27,10 @@ describe("CitationPanel", () => {
     expect(screen.getByText(/Gray/)).toBeInTheDocument();
   });
 
-  it("renders nothing for empty sources", () => {
-    const { container } = render(<CitationPanel data={{ sources: [] }} />);
-    expect(container).toBeEmptyDOMElement();
+  it("shows empty-state notice (not empty DOM) for empty sources (C1)", () => {
+    render(<CitationPanel data={{ sources: [] }} />);
+    expect(screen.getByText(/本回答未引用教科書頁面/)).toBeInTheDocument();
+    // Must NOT render the count header for zero sources
+    expect(screen.queryByText(/引用.*\d/)).not.toBeInTheDocument();
   });
 });
