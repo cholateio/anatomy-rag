@@ -84,6 +84,32 @@ async def _write_feedback(*, user_id, message_id, rating, text) -> bool:
 - `feedback.py` 端點：`ok = await request.app.state.write_feedback(user_id=..., message_id=..., rating=..., text=...)`；`apply_feedback` 回傳該 bool；`if not ok: raise HTTPException(404, "找不到該回合或無權限")`。
 - **新增測試**：feedback 先於 log_query → upsert 後 feedback 存在；log_query 後到 → ON CONFLICT 補 query_text 不蓋 feedback；他人 turn_id → affected 0 → 404。（query_text 維持 NOT NULL；feedback-first 用 `''` 佔位，log_query 後到覆寫。）
 
+### R2-v2（Critical，**取代上述 R2 upsert**；Opus+Codex 雙審 H1/H2/M1 一致）：stream 開始即建列 + finalize + feedback 純 UPDATE
+> R2 的「兩端 upsert-on-turn_id」有缺陷：`_write_feedback` 的 INSERT branch 對**任何未知 UUID** 建列 → 回假 200（H1）、可被認證者灌假 `query_logs` 列（/feedback 無限流）、feedback-first 跨 user 所有權劫持（H2，接 SSO 後成真）、DB 例外被當 404（M1）。**正解＝turn 列在串流開始即同步建立（含真 user_id），feedback 純 UPDATE。**
+- chat.py `chat_event_stream` 頂端（turn_id 後、**任何 yield / cache 檢查前**）：`await deps.log_begin(turn_id, user.user_id, normalized.query, normalized.conversation_id)`（**fail-soft**：try/except 記 warning 後續跑，DB 掛不擋聊天）。
+- `_log_begin`（main.py）：`INSERT INTO query_logs (turn_id, user_id, query_text, conversation_id) VALUES ($1::uuid,$2::uuid,$3,$4::uuid) ON CONFLICT (turn_id) DO NOTHING`（status/cache_hit 走欄位 DEFAULT；query_text=真 query；fail-soft）。
+- 5 條路徑收尾改 `deps.spawn(deps.log_finalize(turn_id, status=…, cache_hit=…, model_used=…))`：`UPDATE query_logs SET status=$2, cache_hit=$3, model_used=$4 WHERE turn_id=$1::uuid`。
+- `_write_feedback`（**純 UPDATE，不吞 DB 例外**）：
+```python
+async def _write_feedback(*, user_id, message_id, rating, text) -> bool:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE query_logs SET feedback=$1, feedback_text=$2 "
+            "WHERE turn_id=$3::uuid AND user_id=$4::uuid RETURNING turn_id",
+            rating, text, message_id, user_id,
+        )
+    return row is not None   # 0 列＝查無此回合或非本人
+```
+- feedback 路由：`ok=await apply_feedback(...)`；`False→HTTPException(404)`；**DB 例外上浮→FastAPI 500**（修 M1，不再一律 404）。
+- `ChatDeps`：`log_query` 欄位拆成 `log_begin` + `log_finalize`（main `_build_chat_deps` 注入兩者）。
+- migration 008 不變（turn_id 仍要 UNIQUE 供 `ON CONFLICT (turn_id) DO NOTHING`）。golden 不變（begin/finalize 非 SSE 事件）。
+- 測試：begin 在第一個 SSE 前被呼叫一次（turn_id+user_id+query）；5 路徑各 spawn finalize 帶 turn_id+正確 status/cache_hit；feedback 未知 turn_id→404、跨 user→404、正常→200、DB 例外→500。db-tier 補：未知→0 列→404 且不殘列、正常 update、跨 user 不可改。
+
+### R2b（Medium，M2）：空白 feedback text → 400
+`parse_feedback_body`：`if text is not None and not text.strip(): raise ValueError("text 不可為空")`；route tests 補 `text=""`/whitespace → 400。
+
+### R2c（Minor，Opus）：`test_008_turn_id_schema` 依賴 `migrated_db` fixture（自足、可單獨跑）；移除重複 `from alembic import command`；`gen_turn_id` 改模組層 `def _new_turn_id(): return str(uuid.uuid4())` + `field(default_factory=lambda: _new_turn_id)`。
+
 ### R3（High，補強 Task 0.2/0.5）：列出並替換既有過時 assertion
 先 `grep -rn '"type": "start"\|transient\|conversation_id' backend/tests` 盤點。`test_api_chat_unit.py` 所有 `start == {"type":"start"}` → 加 `"messageId": FIXED_TURN`；`test_api_chat_sse_unit.py` golden 期望（含 `transient:true`、無 messageId）同步改；兩檔 deps 注入 `gen_turn_id=lambda: FIXED_TURN`。
 
