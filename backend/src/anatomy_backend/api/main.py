@@ -16,6 +16,7 @@ Lifespan 建立全鏈路 deps 並注入 app.state：
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 from contextlib import asynccontextmanager
 
@@ -36,8 +37,8 @@ _BG: set = set()
 
 
 def _spawn(coro) -> None:
-    """production spawn：create_task + 保留參考 + 錯誤記 log（SSE 收尾副作用）。"""
-    t = asyncio.create_task(coro)
+    """production spawn：create_task（乾淨 context，防 OTel span 等 contextvar 洩漏）+ 保留參考 + 記錯。"""
+    t = asyncio.create_task(coro, context=contextvars.Context())
     _BG.add(t)
 
     def _done(task):
@@ -50,6 +51,14 @@ def _spawn(coro) -> None:
     t.add_done_callback(_done)
 
 
+async def flush_tracer(tracer, *, timeout: float = 2.0) -> None:
+    """有界 flush：to_thread + wait_for；逾時(TimeoutError⊂Exception)/失敗→記錄續行。"""
+    try:
+        await asyncio.wait_for(asyncio.to_thread(tracer.flush), timeout=timeout)
+    except Exception:  # noqa: BLE001
+        logger.warning("tracer.flush 逾時/失敗（忽略），繼續關閉", exc_info=True)
+
+
 # ── Lifespan：全鏈路初始化（生產用；測試不觸發）──────────────────────────────
 
 
@@ -57,6 +66,12 @@ def _spawn(coro) -> None:
 async def lifespan(app: FastAPI):
     """啟動觸發設定驗證（fail-fast）並建立全部 deps，關閉時清理。"""
     settings = get_settings()  # 壞設定在此即拋 ValueError（容器不啟動）
+
+    # ── 觀測性（Sentry + LangFuse tracer；fail-open，無憑證→no-op）──────────
+    from anatomy_backend.observability import build_tracer, init_sentry
+
+    init_sentry(settings)            # 無 DSN/失敗→no-op False
+    tracer = build_tracer(settings)  # 無金鑰/建構失敗→NoOpTracer
 
     # ── DB pool ────────────────────────────────────────────────────────────
     import asyncpg
@@ -159,6 +174,7 @@ async def lifespan(app: FastAPI):
             spawn=_spawn,
             kb_version=settings.active_kb_version,
             is_disconnected=request.is_disconnected,
+            tracer=tracer,
         )
 
     # ── Publish on app.state ───────────────────────────────────────────────
@@ -168,11 +184,13 @@ async def lifespan(app: FastAPI):
     app.state.spawn = _spawn
     app.state.build_chat_deps = _build_chat_deps
     app.state.write_feedback = _write_feedback
+    app.state.tracer = tracer
 
     logger.info("anatomy-rag backend lifespan 啟動完成（pool/redis/encoder/llm/cache ready）")
     yield
 
     # ── Cleanup ────────────────────────────────────────────────────────────
+    await flush_tracer(tracer)   # 有界 flush（不卡關閉）
     await pool.close()
     await redis_client.aclose()
     # Fix 4: 關閉 encoder 的 httpx client（EncoderClient 才有 _http；MockEncoderClient 無）

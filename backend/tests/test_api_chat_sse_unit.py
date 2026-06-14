@@ -415,3 +415,52 @@ async def test_chat_records_trace_spans_and_citation_score():
     assert any(n == "citation_verified" for n, _ in tracer.scores)
     # chat 把原始 user_id 交給 tracer.trace（由 tracer 端假名化；chat 不負責 hash）
     assert tracer.trace_user_id == user.user_id
+
+
+# ── Task 7：spawn context 隔離 + flush_tracer ────────────────────────────────
+
+
+async def test_spawn_isolates_contextvars():
+    """production _spawn 用乾淨 contextvars.Context()，背景任務不繼承呼叫端 contextvar（防 OTel span 洩漏）。"""
+    import asyncio
+    import contextvars
+
+    from anatomy_backend.api.main import _spawn
+
+    cv = contextvars.ContextVar("probe", default="default")
+    cv.set("parent-value")
+    seen = {}
+
+    async def _job():
+        seen["v"] = cv.get()
+
+    _spawn(_job())
+    await asyncio.sleep(0.05)
+    assert seen["v"] == "default"  # 未繼承 parent-value → context 已隔離
+
+
+async def test_flush_tracer_does_not_raise_on_error():
+    from anatomy_backend.api.main import flush_tracer
+
+    class _BoomTracer:
+        def flush(self):
+            raise RuntimeError("flush boom")
+
+    await flush_tracer(_BoomTracer(), timeout=1.0)  # 不拋（fail-open）
+
+
+async def test_flush_tracer_bounded_by_timeout():
+    # Codex#5 v2：flush 阻塞時，flush_tracer 仍在 timeout 附近返回，不卡 shutdown。
+    import asyncio
+    import time
+
+    from anatomy_backend.api.main import flush_tracer
+
+    class _StuckTracer:
+        def flush(self):
+            time.sleep(0.5)
+
+    loop = asyncio.get_event_loop()
+    start = loop.time()
+    await flush_tracer(_StuckTracer(), timeout=0.05)
+    assert loop.time() - start < 0.4  # 未等滿 0.5s
