@@ -6,8 +6,12 @@ requires-python = ">=3.11"
 dependencies = ["anatomy-shared", "numpy>=1.26", "pyyaml>=6"]
 
 [project.optional-dependencies]
-ragas = ["ragas>=0.4,<0.5", "langchain-openai>=0.1", "datasets>=2.19"]
+# ragas==0.4.3 精確 pin [M-1]；rapidfuzz/rouge-score 為 NonLLMContextRecall/RougeScore 隱式依賴
+ragas = ["ragas==0.4.3", "langchain-openai>=0.1", "datasets>=2.19", "rapidfuzz>=3", "rouge-score>=0.1"]
 review = ["streamlit>=1.35"]
+
+[project.scripts]
+anatomy-eval-ragas = "anatomy_eval.ragas_cli:main"
 
 [build-system]
 requires = ["hatchling"]
