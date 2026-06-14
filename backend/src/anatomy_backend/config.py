@@ -76,6 +76,8 @@ class Settings(BaseSettings):
     langfuse_host: str = ""
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
+    # 假名化 LangFuse user_id 的 salt（D-M：trace 不收原始識別碼，但可追蹤）
+    langfuse_user_id_salt: str = ""
     sentry_dsn: str = ""
 
     @field_validator("database_url")
