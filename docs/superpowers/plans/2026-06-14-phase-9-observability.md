@@ -124,6 +124,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import sys
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, ExitStack, contextmanager
 from typing import Protocol
@@ -158,7 +159,17 @@ def _safe_cm(enters: list[Callable[[], AbstractContextManager]]) -> Iterator[Non
         stack = None  # type: ignore[assignment]
     try:
         yield
-    finally:
+    except BaseException:
+        # 業務例外 / GeneratorExit(取消)：把錯誤轉發給 tracer span（標記 error，Codex#medium v3），
+        # 抑制 tracer exit 失敗，再重新拋出原始例外（絕不吞）。
+        if stack is not None:
+            try:
+                stack.__exit__(*sys.exc_info())
+            except Exception:  # noqa: BLE001  tracer exit(error) 失敗→忽略
+                logger.warning("tracer exit(error) 失敗（忽略）", exc_info=True)
+            stack = None  # type: ignore[assignment]
+        raise
+    else:
         if stack is not None:
             try:
                 stack.close()
@@ -381,6 +392,41 @@ async def test_safe_cm_partial_enter_then_rollback_failure_does_not_escape():
     with _safe_cm([lambda: _ok_enter_bad_exit(), _bad_enter]):
         r = 99
     assert r == 99
+
+
+async def test_safe_cm_forwards_body_exception_to_span_exit():
+    # Codex#medium v3：業務例外須轉發給 span __exit__（標記 error），且原始例外照常傳播。
+    from anatomy_backend.observability.tracing import _safe_cm
+
+    seen = {}
+
+    class _RecCM:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, et, ev, tb):
+            seen["exc_type"] = et
+            return False   # 不抑制
+
+    with pytest.raises(ValueError):
+        with _safe_cm([_RecCM]):
+            raise ValueError("body")
+    assert seen["exc_type"] is ValueError
+
+
+async def test_langfuse_metadata_value_validation_and_score_allowlist():
+    fake = _FakeLangfuse()
+    t = LangfuseTracer(fake, id_salt="s")
+    long_text = "這是一段很長的查詢文字應被擋下" * 2   # >16 字
+    with t.trace("chat", user_id="u",
+                 metadata={"status": long_text, "is_followup": True, "kb_version": 1}):
+        pass
+    md = fake.attrs[0]["metadata"]
+    assert md == {"is_followup": True, "kb_version": 1}   # 長字串 value 被擋；只留安全 primitive
+    t.score("cache_hit", 1.0)                              # allowlist name→送
+    t.score("evil_name", 1.0, comment="leak query")       # 非 allowlist→丟棄、comment 不外送
+    assert ("cache_hit", 1.0) in fake.scores
+    assert all(n != "evil_name" for n, _ in fake.scores)
 ```
 
 - [ ] **Step 3：跑測試確認失敗**
@@ -391,13 +437,23 @@ Expected: FAIL（`ImportError: LangfuseTracer`）
 - [ ] **Step 4：實作 `LangfuseTracer` + `build_tracer`（加到 `tracing.py`）**
 
 ```python
-# trace metadata 只允許這些非自由文字、非識別性欄位進 LangFuse（其餘一律丟棄，Codex#4 v2）。
+# trace metadata 只允許這些 key（Codex#4 v2）；且 value 必須是 primitive 或短 enum（Codex#high v3）。
 _ALLOWED_METADATA_KEYS = frozenset({"is_followup", "kb_version", "status", "cache_hit", "lang"})
+# score name 固定 allowlist（Codex#high v3）；comment 一律不外送（防自由文字）。
+_ALLOWED_SCORE_NAMES = frozenset({"cache_hit", "citation_verified", "latency_ms", "status_ok"})
+_MAX_METADATA_STR = 16  # 短 enum 上限；query/檢索內容必更長→擋下自由文字偽裝成核准 key
+
+
+def _safe_metadata_value(v) -> bool:
+    """只允許 bool/int/float 或 ≤16 字短字串（enum）；擋下偽裝成核准 key 的自由文字/原始 id。"""
+    if isinstance(v, (bool, int, float)):
+        return True
+    return isinstance(v, str) and len(v) <= _MAX_METADATA_STR
 
 
 class LangfuseTracer:
     """包 LangFuse v4 client（OTel）。trace/span 經 _safe_cm fail-open；
-    只收假名化 user_id（D-M）+ metadata allowlist；score/flush fail-open。"""
+    只收假名化 user_id（D-M）+ metadata key/value allowlist + score name allowlist；score/flush fail-open。"""
 
     def __init__(self, client, *, id_salt: str = "") -> None:
         self._lf = client
@@ -407,8 +463,11 @@ class LangfuseTracer:
         self, name: str, *, user_id: str | None = None, metadata: dict | None = None
     ) -> AbstractContextManager[None]:
         pseudo = _pseudonymize(user_id, self._salt)   # 只送假名，絕不送原始
-        # metadata allowlist：只放核准欄位，擋掉 query/檢索內容/原始 id 等誤傳
-        safe_md = {k: v for k, v in (metadata or {}).items() if k in _ALLOWED_METADATA_KEYS}
+        # metadata key + value allowlist：擋掉 query/檢索內容/原始 id（含偽裝成核准 key 的長字串）
+        safe_md = {
+            k: v for k, v in (metadata or {}).items()
+            if k in _ALLOWED_METADATA_KEYS and _safe_metadata_value(v)
+        }
         attrs = {"user_id": pseudo, "metadata": safe_md}
         return _safe_cm([
             lambda: self._lf.propagate_attributes(**attrs),
@@ -419,8 +478,12 @@ class LangfuseTracer:
         return _safe_cm([lambda: self._lf.start_as_current_observation(name=name)])
 
     def score(self, name: str, value: float, *, comment: str | None = None) -> None:
+        # score name allowlist；comment 一律丟棄（不外送自由文字，Codex#high v3）
+        if name not in _ALLOWED_SCORE_NAMES:
+            logger.warning("LangfuseTracer.score 非 allowlist name=%r→丟棄", name)
+            return
         try:
-            self._lf.score_current_span(name=name, value=value, comment=comment)
+            self._lf.score_current_span(name=name, value=value)
         except Exception:  # noqa: BLE001
             logger.warning("LangfuseTracer.score 失敗（忽略）", exc_info=True)
 
@@ -523,7 +586,9 @@ def test_scrub_allowlist_drops_all_free_text_and_identifiers():
         "extra": {"whatever": _Q},
         "user": {"id": "B12345678", "username": _Q},
         "tags": {"note": _Q},
-        "contexts": {"trace": {"trace_id": "abc", "user_id": "B12345678"},
+        "contexts": {"trace": {"trace_id": "abc", "span_id": "def",
+                               "description": _Q, "user_id": "B12345678"},
+                     "device": {"name": _Q},
                      "custom": {"note": _Q}},
     }
     out = scrub_event(ev, {})
@@ -536,8 +601,12 @@ def test_scrub_allowlist_drops_all_free_text_and_identifiers():
     # 自由文字/識別性容器整塊丟棄
     for dropped in ("user", "tags", "extra", "breadcrumbs", "request", "message", "logentry"):
         assert dropped not in out
-    assert "custom" not in out["contexts"]   # 未核准 context 型別丟棄
-    assert "trace" in out["contexts"]        # 核准型別保留（已 key-scrub→user_id 已遮）
+    # contexts：core trace id 保留；自由文字子欄位(description)/識別(user_id)/未核准型別(device/custom) 皆去除
+    assert out["contexts"]["trace"]["trace_id"] == "abc"
+    assert "description" not in out["contexts"]["trace"]
+    assert "user_id" not in out["contexts"]["trace"]
+    assert "device" not in out["contexts"]
+    assert "custom" not in out["contexts"]
 
 
 def test_scrub_returns_none_on_non_dict():
@@ -621,8 +690,14 @@ _ALLOWED_TOP_KEYS = frozenset({
     "event_id", "timestamp", "level", "platform", "logger",
     "sdk", "release", "environment", "server_name", "transaction", "modules",
 })
-_ALLOWED_CONTEXT_TYPES = frozenset({"runtime", "os", "device", "trace"})
-_ALLOWED_FRAME_KEYS = frozenset({"filename", "module", "function", "lineno", "in_app", "abs_path"})
+# contexts 只留這些型別的這些子欄位（device 整個丟棄；trace.description 等自由文字不在內，Codex#critical v3）
+_ALLOWED_CONTEXT_FIELDS = {
+    "runtime": frozenset({"name", "version", "build"}),
+    "os": frozenset({"name", "version", "build", "kernel_version"}),
+    "trace": frozenset({"trace_id", "span_id", "parent_span_id", "op", "status"}),
+}
+# frame 只留程式碼定位（去 filename/abs_path/context_line/vars 等可能含路徑/自由文字者）
+_ALLOWED_FRAME_KEYS = frozenset({"module", "function", "lineno", "in_app"})
 
 
 def _safe_exc_value(v: dict) -> dict:
@@ -644,8 +719,9 @@ def _safe_exc_value(v: dict) -> dict:
 
 def scrub_event(event, hint):
     """Sentry before_send（**結構 allowlist**）：只保留核准頂層欄位，其餘（user/tags/extra/
-    breadcrumbs/request/message/logentry/未知）整塊丟棄；例外僅留 type+stacktrace；contexts 僅留
-    核准型別並再 key-scrub。非 dict/出錯→回 None 丟棄該 event。"""
+    breadcrumbs/request/message/logentry/未知）整塊丟棄；例外僅留 type+stacktrace（frame 只留
+    module/function/lineno/in_app）；contexts 僅留核准型別的核准子欄位（device 整個丟棄）並再
+    key-scrub。非 dict/出錯→回 None 丟棄該 event。"""
     try:
         if not isinstance(event, dict):
             return None
@@ -659,9 +735,12 @@ def scrub_event(event, hint):
             }
         ctx = event.get("contexts")
         if isinstance(ctx, dict):
-            out["contexts"] = {
-                t: _scrub(ctx[t]) for t in _ALLOWED_CONTEXT_TYPES if isinstance(ctx.get(t), dict)
-            }
+            kept = {}
+            for t, fields in _ALLOWED_CONTEXT_FIELDS.items():
+                c = ctx.get(t)
+                if isinstance(c, dict):
+                    kept[t] = _scrub({k: c[k] for k in fields if k in c})
+            out["contexts"] = kept
         return out
     except Exception:  # noqa: BLE001  寧可丟棄也不洩漏
         logger.warning("Sentry scrub_event 失敗→丟棄該 event", exc_info=True)
@@ -1096,17 +1175,18 @@ DL-011 定觀測先 LangFuse+Sentry、Prometheus 延後；D-M 定改 Sentry/Lang
 
 ### 提案（與 DL-011/D-M 一致；化解 §6.5×D-M）
 1. **mock-first + fail-open**：`build_tracer` 無金鑰/缺 salt/import/建構失敗→`NoOpTracer`；`init_sentry` 無 DSN/init 失敗→False；tracer trace/span/score/flush 任一例外不中斷 `/chat`（`_safe_cm` 只抑制 tracer enter/exit、不二次 yield、不吞業務例外，含 enter 回滾再失敗）；**shutdown flush 有界**（to_thread + wait_for timeout）不卡關閉。CI 零外部呼叫。
-2. **假名化 trace id 化解 §6.5×D-M**：LangFuse 只收 **HMAC-SHA256(key=高熵 salt, msg=user_id)** 假名（128 bits；§6.5「可追蹤」），**缺 salt 則不啟用 LangFuse**（防低熵 ID 字典反查）；trace metadata 採 **allowlist**；**MUST NOT** 收原始 user_id/學號/query/檢索內容（D-M）。
-3. **Sentry 結構 allowlist 脫敏（D-M）**：`send_default_pii=False` + `max_request_body_size="never"` + `include_local_variables=False` + `before_send` **只保留核准頂層欄位 + 例外 type/stacktrace 結構 + 核准 contexts 型別**，其餘（user/tags/extra/breadcrumbs/request/message/logentry/未知）整塊丟棄；非 dict/出錯→回 None 丟棄 event。
+2. **假名化 trace id 化解 §6.5×D-M**：LangFuse 只收 **HMAC-SHA256(key=高熵 salt, msg=user_id)** 假名（128 bits；§6.5「可追蹤」），**缺 salt 則不啟用 LangFuse**（防低熵 ID 字典反查）；trace metadata 採 **key+value allowlist**（value 限 primitive 或 ≤16 字短 enum）；**score name 固定 allowlist、comment 不外送**；**MUST NOT** 收原始 user_id/學號/query/檢索內容（D-M）。
+3. **Sentry 結構 allowlist 脫敏（D-M）**：`send_default_pii=False` + `max_request_body_size="never"` + `include_local_variables=False` + `before_send` **只保留核准頂層欄位 + 例外 type/stacktrace 結構（frame 只留 module/function/lineno/in_app）+ 核准 contexts 型別的核准子欄位（device 整個丟棄）**，其餘（user/tags/extra/breadcrumbs/request/message/logentry/未知）整塊丟棄；非 dict/出錯→回 None 丟棄 event。保留的頂層/結構欄位由 Sentry 以伺服器端來源填充（hostname/route/套件版/code 位置），本架構不將使用者內容寫入這些欄位（**程式碼終審以無洩漏斷言測試守門**）。
 4. **背景任務 context 隔離**：`_spawn` 用乾淨 `contextvars.Context()`，detached log/cache 任務不繼承 OTel span（防錯置/洩漏）。
 5. **metrics 走 LangFuse score + 結構化 log**（cache_hit/citation_verified/latency）；**Prometheus/Grafana 維持延後（DL-011）**。
 6. **告警誠實降級**：本 phase 只交付 `evaluate_alerts` 條件邏輯 + `Notifier` 介面（預設 `LogNotifier`）。**§7.5 MUST 告警在 v1 尚未 operational**——metrics 來源彙整、連續時間窗排程、真實 Slack/email 管道與 owner **延後 ops**（新連線，先問）。
 7. **不新增套件**：`langfuse`/`sentry-sdk` 已在 deps。
 
 ### 後果
-- 設 LangFuse/Sentry 憑證才真正送出；未設則靜默 no-op（log 仍在）。
+- 設 LangFuse/Sentry 憑證才真正送出；未設則靜默 no-op（log 仍在）。Phase 9 mock-first→零外部流量、零費用。
 - §7.5 告警目前僅邏輯+介面；接真實 metrics 來源、排程與通知管道屬部署/ops（後續 phase 或 runbook）。
-- LangFuse 端只能以假名分群追蹤；要對應回原始學號須在受控環境以同 salt 重算 hash。
+- LangFuse 端只能以假名分群追蹤；要對應回原始學號須在受控環境以同 salt 重算 hash（啟用 LangFuse MUST 設高熵 `langfuse_user_id_salt`）。
+- **Sentry 後端選擇（ops 後續，先問）**：`sentry-sdk` client 免費已在 deps；後端可走 SaaS 免費 Developer tier（5K errors/月、超量靜默丟棄）或**自託管 GlitchTip**（4 容器、相容 Sentry SDK、改 DSN 即可，符合資料存校內治理）。本設計 error-only + 脫敏，量小，免費 tier 多半足夠。
 ```
 
 - [ ] **Step 2：ruff（勿 format）**
