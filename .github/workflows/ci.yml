@@ -1,5 +1,5 @@
 name: CI
-on: { pull_request: {}, push: { branches: [main] } }
+on: { pull_request: {}, push: { branches: [main] }, workflow_dispatch: {} }
 
 jobs:
   unit:                                  # 不連 DB：config / healthz / encoder mock / binary 等純單元
@@ -23,10 +23,95 @@ jobs:
       - name: 確認 binarize/pool/hamming 僅定義於 shared（§2.4 單一來源）
         run: "! grep -rInE --include='*.py' 'def (binarize|to_pg_bits|pool_patches|hamming_distance)\\(' backend ingest eval colpali_service || (echo '向量運算函式只能定義在 shared/binary.py' && exit 1)"
       - name: 確認 ingest 離線管線無雲端 LLM SDK（CLAUDE.md 紅線）
+        # 注意：守門範圍 ingest/src；eval/ 合法使用 openai/langchain_openai（eval[ragas] 路徑，零呼叫 CI 保證由 patch+清 key 確保，[M-2]）
         run: "! grep -rInE --include='*.py' '(import|from)\\s+(openai|anthropic)\\b' ingest/src || (echo '離線管線禁 import 雲端 LLM SDK' && exit 1)"
       - name: 確認語意快取層無雲端 LLM SDK（DL-012：本地比對、零 OpenAI）
+        # 注意：守門範圍 backend/src/anatomy_backend/cache；eval/ 不在此範圍（[M-2] 確認）
         run: "! grep -rInE --include='*.py' '^\\s*(import|from)\\s+openai\\b' backend/src/anatomy_backend/cache || (echo '語意快取禁 import openai（線上 lookup 本地比對，DL-012）' && exit 1)"
-      - run: uv run --no-sync pytest backend/tests shared/tests colpali_service/tests eval/tests -q
+      - run: uv run --no-sync pytest backend/tests shared/tests colpali_service/tests -q
+      - name: offline eval（torch-free, no RAGAS；§7.3 DL-028）
+        run: |
+          uv run --no-sync pytest \
+            eval/tests/test_golden_schema.py \
+            eval/tests/test_recall_harness.py \
+            eval/tests/test_gate.py \
+            eval/tests/test_recall_gate.py \
+            eval/tests/test_retention.py \
+            eval/tests/test_kappa.py \
+            eval/tests/test_regression.py \
+            eval/tests/test_review_loader.py \
+            eval/tests/test_reference_maxsim.py \
+            -v
+      - name: golden 就緒檢查（warning 不阻 merge，DL-028 [H-5]）
+        run: |
+          uv run --no-sync python -c "
+          from anatomy_eval.golden import load_golden, golden_readiness
+          import json, pathlib, sys
+          p = pathlib.Path('tests/golden_qa.jsonl')
+          if p.exists():
+              rep = golden_readiness(load_golden(p))
+              if not rep['ready']:
+                  print('::warning::黃金題庫未達就緒（DL-028，不阻 merge）：' + json.dumps(rep, ensure_ascii=False), file=sys.stderr)
+              else:
+                  print('golden_readiness: ready=True, total=' + str(rep['total']))
+          else:
+              print('::warning::tests/golden_qa.jsonl 尚不存在（DL-028，不阻 merge）', file=sys.stderr)
+          "
+
+  ragas:                                 # RAGAS 0.4.3 決定性核心 + 薄 LLM wiring（零 OpenAI 呼叫）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --group dev
+      - run: uv sync --package anatomy-eval --extra ragas --inexact   # [M-7]
+      - name: RAGAS 版本 + torch-free 斷言 [H-7][L-2]
+        run: |
+          uv run --no-sync python -c "
+          import ragas, sys
+          assert ragas.__version__ == '0.4.3', 'RAGAS version mismatch: ' + ragas.__version__
+          try:
+              import torch
+              print('ERROR: torch was importable (should be torch-free)', file=sys.stderr)
+              sys.exit(1)
+          except ImportError:
+              pass
+          print('RAGAS ' + ragas.__version__ + ' + torch-free: OK')
+          "
+      - name: ragas tests + 執行數斷言（防 importorskip 假綠 [H-7]）
+        run: |
+          uv run --no-sync pytest -m ragas --strict-markers eval/tests -v \
+            > ragas_output.txt 2>&1
+          PYTEST_EXIT=$?
+          cat ragas_output.txt
+          if ! grep -qE '[0-9]+ passed' ragas_output.txt; then
+            echo "::error::ragas CI: no tests passed (全 skip 或 collection error) — 防假綠 [H-7]" >&2
+            exit 1
+          fi
+          exit $PYTEST_EXIT
+
+  real-ragas-gate:                       # 真實 RAGAS gate（§7.3，DL-028：workflow_dispatch only）
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --group dev
+      - run: uv sync --package anatomy-eval --extra ragas --inexact
+      - name: 真實 RAGAS 評估（需 EVAL_OPENAI_KEY secret）
+        env:
+          EVAL_OPENAI_KEY: ${{ secrets.EVAL_OPENAI_KEY }}
+          OPENAI_API_KEY: ${{ secrets.EVAL_OPENAI_KEY }}
+        run: |
+          uv run --no-sync anatomy-eval-ragas \
+            --golden tests/golden_qa.jsonl \
+            --report eval_report.json \
+            --real
+      - name: RAGAS gate 門檻檢查（§7.3）
+        run: |
+          uv run --no-sync python -m anatomy_eval.gate \
+            --report eval_report.json \
+            --thresholds eval/eval_thresholds.yaml
 
   db-integration:                        # Phase 2 起有 DB/檢索測試；Phase 0 驗 migrate 框架可執行
     runs-on: ubuntu-latest
@@ -93,4 +178,5 @@ jobs:
         with: { fetch-depth: 0 }
       - uses: gitleaks/gitleaks-action@v2
 
-  # Phase 11 啟用：RAGAS gate（未達門檻阻擋 merge，§7.3）
+  # Phase 11：offline eval（unit job）+ ragas job（決定性零呼叫）已啟用。
+  # 真實 RAGAS gate（§7.3）：workflow_dispatch only（real-ragas-gate job），待 ≥110 教師題 + EVAL_OPENAI_KEY。
