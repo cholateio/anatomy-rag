@@ -280,6 +280,8 @@ make up-obs   # 另起 LangFuse（自帶獨立 Postgres，對外 :3100，避開 
 ```
 填好 `.env` 的 `LANGFUSE_*` 後使用；LangFuse 用自己的 DB，不直連主 DB（避免違反 §0.3 :5432 紅線）。
 
+**後端 trace 啟用條件（DL-026）：** 後端要真正送 trace，除了 `LANGFUSE_HOST`/`LANGFUSE_PUBLIC_KEY`/`LANGFUSE_SECRET_KEY`，**必須**另設高熵 `LANGFUSE_USER_ID_SALT`（≥16 字，假名化學號用；與 LangFuse 自身的 `LANGFUSE_SALT` 不同）——缺或太短時後端 tracer 會 fail-open 為 NoOp（不送 trace）。`SENTRY_DSN` 空則停用 Sentry；Sentry 後端可用 SaaS 免費 tier 或自託管 GlitchTip（相容 SDK、改 DSN 即可，符合資料存校內）。
+
 ---
 
 ## §C 常見錯誤排解
