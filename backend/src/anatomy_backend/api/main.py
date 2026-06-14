@@ -19,6 +19,7 @@ import asyncio
 import contextvars
 import logging
 import threading
+import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -141,30 +142,51 @@ async def lifespan(app: FastAPI):
 
     # ── DB write helpers ───────────────────────────────────────────────────
     async def _log_query(*, user_id, query, conversation_id=None, cache_hit=False,
-                         status="ok", model_used=None, **_kw):
+                         status="ok", model_used=None, turn_id=None, **_kw):
         try:
             async with pool.acquire() as conn:
-                await conn.execute(
+                _sql = (
                     "INSERT INTO query_logs "
-                    "(user_id, query_text, conversation_id, cache_hit, status, model_used) "
-                    "VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6)",
+                    "(user_id, query_text, conversation_id, cache_hit,"
+                    " status, model_used, turn_id) "
+                    "VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7::uuid) "
+                    "ON CONFLICT (turn_id) DO UPDATE SET "
+                    "query_text=EXCLUDED.query_text,"
+                    " conversation_id=EXCLUDED.conversation_id,"
+                    " cache_hit=EXCLUDED.cache_hit,"
+                    " status=EXCLUDED.status,"
+                    " model_used=EXCLUDED.model_used"
+                )
+                await conn.execute(
+                    _sql,
                     user_id, query, conversation_id, cache_hit,
                     status if status in ALLOWED_LOG_STATUSES else "ok",
-                    model_used,
+                    model_used, turn_id,
                 )
         except Exception:
             logger.warning("query_logs INSERT 失敗", exc_info=True)
 
-    async def _write_feedback(*, user_id, conversation_id, rating, text):
+    async def _write_feedback(*, user_id, message_id, rating, text) -> bool:
         try:
             async with pool.acquire() as conn:
-                await conn.execute(
-                    "UPDATE query_logs SET feedback=$1, feedback_text=$2 "
-                    "WHERE conversation_id=$3::uuid AND user_id=$4::uuid",
-                    rating, text, conversation_id, user_id,
+                _fb_sql = (
+                    "INSERT INTO query_logs"
+                    " (turn_id, user_id, query_text, feedback, feedback_text)"
+                    " VALUES ($3::uuid, $4::uuid, '', $1, $2)"
+                    " ON CONFLICT (turn_id) DO UPDATE SET"
+                    " feedback=EXCLUDED.feedback,"
+                    " feedback_text=EXCLUDED.feedback_text"
+                    " WHERE query_logs.user_id = $4::uuid"
+                    " RETURNING turn_id"
                 )
+                row = await conn.fetchrow(
+                    _fb_sql,
+                    rating, text, message_id, user_id,
+                )
+            return row is not None
         except Exception:
-            logger.warning("feedback UPDATE 失敗", exc_info=True)
+            logger.warning("feedback upsert 失敗", exc_info=True)
+            return False
 
     # ── retrieve wrapper ───────────────────────────────────────────────────
     from anatomy_backend.retrieval.orchestrator import retrieve
@@ -186,6 +208,7 @@ async def lifespan(app: FastAPI):
             kb_version=settings.active_kb_version,
             is_disconnected=request.is_disconnected,
             tracer=tracer,
+            gen_turn_id=lambda: str(uuid.uuid4()),
         )
 
     # ── Publish on app.state ───────────────────────────────────────────────

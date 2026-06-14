@@ -3,10 +3,10 @@
 rating ∈ {1,-1}；text 應用層截斷 ≤2000；MUST 經 auth（user_id 由 get_current_user 提供）。
 高頻拒絕事件不逐筆寫 DB（DL-022：Redis TTL 計數）；回饋寫入不在此限（低頻、有價值）。
 
-DB schema（005_query_logs.py）：
+DB schema（005_query_logs.py + 008_query_logs_turn_id.py）：
     feedback     SMALLINT CHECK (feedback IN (-1, 0, 1))
     feedback_text TEXT
-    conversation_id UUID
+    turn_id      UUID UNIQUE  -- per-turn granularity（DL-027）
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ _TEXT_MAX = 2000
 
 @dataclass(frozen=True)
 class FeedbackInput:
-    conversation_id: str
+    message_id: str
     rating: int
     text: str | None
 
@@ -37,16 +37,16 @@ def parse_feedback_body(body: dict) -> FeedbackInput:
     """驗證並解析回饋請求 body。輸入無效時 raise ValueError / TypeError（路由層轉 400）。
 
     規則：
-      - conversation_id 必填且必須為合法 UUID。
+      - message_id 必填且必須為合法 UUID（= turn_id = AI SDK start.messageId）。
       - rating 必填且必須為可轉 int 的值（FeedbackInput.__post_init__ 再驗 ∈ {1,-1}）。
     """
-    cid = body.get("conversation_id")
-    if cid is None:
-        raise ValueError("conversation_id 必填")
+    mid = body.get("message_id")
+    if mid is None:
+        raise ValueError("message_id 必填")
     try:
-        uuid.UUID(str(cid))
+        uuid.UUID(str(mid))
     except (ValueError, AttributeError) as exc:
-        raise ValueError(f"conversation_id 須為合法 UUID，收到 {cid!r}") from exc
+        raise ValueError(f"message_id 須為合法 UUID，收到 {mid!r}") from exc
     rating_raw = body.get("rating")
     if rating_raw is None:
         raise ValueError("rating 必填")
@@ -54,7 +54,7 @@ def parse_feedback_body(body: dict) -> FeedbackInput:
     if text is not None and not isinstance(text, str):
         raise ValueError(f"text 須為字串或省略，收到 {type(text).__name__}")
     return FeedbackInput(
-        conversation_id=str(cid),
+        message_id=str(mid),
         rating=int(rating_raw),  # non-numeric → ValueError；None 已上方攔截
         text=text,
     )
@@ -64,13 +64,16 @@ async def apply_feedback(
     fb: FeedbackInput,
     *,
     user_id: str,
-    writer: Callable[..., Awaitable[None]],
-) -> None:
-    """驗後寫入。writer 為注入式 async callable（生產用 DB write；測試用 fake）。"""
+    writer: Callable[..., Awaitable[bool]],
+) -> bool:
+    """驗後寫入。writer 為注入式 async callable（生產用 DB write；測試用 fake）。
+
+    Returns True if the row was written/updated, False if not found or wrong user.
+    """
     text = fb.text[:_TEXT_MAX] if fb.text is not None else None
-    await writer(
+    return await writer(
         user_id=user_id,
-        conversation_id=fb.conversation_id,
+        message_id=fb.message_id,
         rating=fb.rating,
         text=text,
     )
@@ -87,7 +90,9 @@ async def feedback(
         fb = parse_feedback_body(body)
     except (ValueError, TypeError) as exc:
         raise HTTPException(status_code=400, detail="無效的回饋請求") from exc
-    await apply_feedback(
+    ok = await apply_feedback(
         fb, user_id=user.user_id, writer=request.app.state.write_feedback
     )
+    if not ok:
+        raise HTTPException(status_code=404, detail="找不到該回合或無權限")
     return {"ok": True}

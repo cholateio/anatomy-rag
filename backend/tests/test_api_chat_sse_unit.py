@@ -36,6 +36,9 @@ _GOLDEN_PATH = pathlib.Path(__file__).parents[2] / "infra" / "golden" / "ai_stre
 # ── 固定測試 tokens（與 golden 對齊）────────────────────────────────────────
 _TOKENS = ["肱二頭肌", "起於喙突 [Gray, p.812, Fig.7-23]。"]
 
+# ── 固定 turn_id（與 golden start.messageId 對齊）───────────────────────────
+FIXED_TURN = "00000000-0000-0000-0000-0000000000aa"
+
 
 def _golden_result() -> RetrievalResult:
     return RetrievalResult(
@@ -166,6 +169,7 @@ async def test_end_to_end_sse_wire_matches_golden_contract():
             spawn=lambda coro: coro.close(),  # no side-effect assertion needed
             kb_version=1,
             is_disconnected=_never_disc,
+            gen_turn_id=lambda: FIXED_TURN,
         )
 
     app.state.build_chat_deps = _build_deps
@@ -206,7 +210,7 @@ async def test_end_to_end_sse_wire_matches_golden_contract():
     def _frame(obj: dict) -> str:
         return "data: " + json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
 
-    assert _frame({"type": "start"}) in raw
+    assert _frame({"type": "start", "messageId": FIXED_TURN}) in raw
     assert _frame({"type": "text-start", "id": "t0"}) in raw
     assert _frame({"type": "text-delta", "id": "t0", "delta": "肱二頭肌"}) in raw
     expected_delta2 = _frame(
@@ -229,9 +233,9 @@ async def test_end_to_end_sse_wire_matches_golden_contract():
         "SSE 序列與 golden 不符；若後端 emit 格式改變請同步更新 infra/golden/ai_stream_golden.jsonl"
     )
 
-    # data-sources 結構驗證
+    # data-sources 結構驗證（persistent：無 transient 鍵）
     src = next(p for p in parts if isinstance(p, dict) and p["type"] == "data-sources")
-    assert src.get("transient") is True
+    assert "transient" not in src
     assert src["data"]["sources"][0]["page"] == 812
 
     # data-sources 在第一個 text-delta 前
@@ -310,6 +314,7 @@ def _make_chat_deps(cache=None, tracer=None) -> ChatDeps:
         kb_version=1,
         is_disconnected=_never_disc,
         tracer=tracer or NoOpTracer(),
+        gen_turn_id=lambda: FIXED_TURN,
     )
 
 

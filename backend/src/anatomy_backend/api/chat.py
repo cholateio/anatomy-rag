@@ -12,6 +12,7 @@ auth + ratelimit + 正規化 + EventSourceResponse。
 from __future__ import annotations
 
 import logging
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 
@@ -59,6 +60,7 @@ class ChatDeps:
     is_disconnected: Callable[[], Awaitable[bool]]
     top_n: int = 3
     tracer: Tracer = field(default_factory=NoOpTracer)
+    gen_turn_id: Callable[[], str] = field(default_factory=lambda: (lambda: str(uuid.uuid4())))
 
 
 def _intent(normalized: NormalizedChat) -> QueryIntent:
@@ -93,12 +95,15 @@ async def chat_event_stream(
         "chat", user_id=user.user_id,
         metadata={"is_followup": normalized.is_followup, "kb_version": kb},
     ):
+        turn_id = deps.gen_turn_id()
         # ── Step 1：快取（追問 MUST NOT 查/寫，DL-021）──────────────────────────
         if not normalized.is_followup:
             cached = await deps.cache.get(normalized.query, kb, normalized.metadata_filter)
             if cached is not None:
-                yield ais.sse_event(ais.start_part())
-                yield ais.sse_event(ais.data_part("sources", {"sources": cached.sources}))
+                yield ais.sse_event(ais.start_part(turn_id))
+                yield ais.sse_event(
+                    ais.data_part("sources", {"sources": cached.sources}, transient=False)
+                )
                 yield ais.sse_event(ais.text_start_part(_TEXT_ID))
                 yield ais.sse_event(ais.text_delta_part(_TEXT_ID, cached.answer))
                 yield ais.sse_event(ais.text_end_part(_TEXT_ID))
@@ -113,6 +118,7 @@ async def chat_event_stream(
                         conversation_id=normalized.conversation_id,
                         cache_hit=True,
                         status="ok",
+                        turn_id=turn_id,
                     )
                 )
                 return
@@ -125,7 +131,7 @@ async def chat_event_stream(
         )
 
         # ── Step 6a：start 提前（失敗路徑也需送合規 SSE 錯誤事件，emit once here）──
-        yield ais.sse_event(ais.start_part())
+        yield ais.sse_event(ais.start_part(turn_id))
 
         # ── Step 3：encode（失敗→ encoder_error 短路，DL-012）──────────────────
         try:
@@ -142,6 +148,7 @@ async def chat_event_stream(
                     conversation_id=normalized.conversation_id,
                     cache_hit=False,
                     status="encoder_error",
+                    turn_id=turn_id,
                 )
             )
             return
@@ -167,6 +174,7 @@ async def chat_event_stream(
                     conversation_id=normalized.conversation_id,
                     cache_hit=False,
                     status="retrieval_error",
+                    turn_id=turn_id,
                 )
             )
             return
@@ -174,7 +182,7 @@ async def chat_event_stream(
         sources_payload = [c.model_dump() for c in citations]
 
         # ── Step 6b：sources（MUST 在第一個 text-delta 前）────────────────────
-        yield ais.sse_event(ais.data_part("sources", {"sources": sources_payload}))
+        yield ais.sse_event(ais.data_part("sources", {"sources": sources_payload}, transient=False))
 
         # ── Step 7：串流 LLM（user_id 入 forbidden_identifiers；連線此時已歸還）──
         text_context = "\n\n".join(r.docling_md for r in results)
@@ -218,6 +226,7 @@ async def chat_event_stream(
                     cache_hit=False,
                     status="llm_error",
                     model_used=None,
+                    turn_id=turn_id,
                 )
             )
             return  # 跳過 verification 和 finish
@@ -235,6 +244,7 @@ async def chat_event_stream(
                     "has_citations": verification.has_citations,
                     "unverified": verification.unverified,
                 },
+                transient=False,
             )
         )
         deps.tracer.score("cache_hit", 0.0)
@@ -255,6 +265,7 @@ async def chat_event_stream(
                 cache_hit=False,
                 status=status,
                 model_used=None,
+                turn_id=turn_id,
             )
         )
         # [F2/H] cache.set 僅在非追問 + ok + all_grounded（防快取偽造引文答案）

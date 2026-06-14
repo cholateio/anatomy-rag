@@ -21,6 +21,8 @@ from anatomy_backend.encoder.client import MockEncoderClient
 from anatomy_backend.llm.mock import MockLLMClient
 from anatomy_backend.retrieval.types import RetrievalResult
 
+FIXED_TURN = "00000000-0000-0000-0000-0000000000aa"
+
 
 def _result(page: int = 812, pt: str = "figure_heavy") -> RetrievalResult:
     return RetrievalResult(
@@ -51,6 +53,7 @@ def _deps(
     logs=None,
     collected=None,
     is_disconnected=None,
+    gen_turn_id=None,
 ) -> ChatDeps:
     # If caller supplies collected list, append for later gather; else close to suppress
     # "coroutine was never awaited" RuntimeWarning from Python GC.
@@ -82,6 +85,7 @@ def _deps(
         spawn=_spawn,  # [F1/H] collect or close, never await
         kb_version=1,
         is_disconnected=is_disconnected or _never_disconnected,
+        gen_turn_id=gen_turn_id if gen_turn_id is not None else (lambda: FIXED_TURN),
     )
 
 
@@ -134,7 +138,7 @@ async def test_sources_payload_has_page_citations():
     user = User("u1", False)
     parts = _json_parts(await _collect(chat_event_stream(_deps(), _norm(), user)))
     src = next(p for p in parts if isinstance(p, dict) and p["type"] == "data-sources")
-    assert src["transient"] is True
+    assert "transient" not in src  # persistent: transient=False → no transient key
     assert src["data"]["sources"][0]["page"] == 812
 
 
@@ -515,3 +519,151 @@ async def test_disconnect_log_status_is_cancelled():
     await _collect(chat_event_stream(deps, _norm(), User("u1", False)))
     await asyncio.gather(*collected)
     assert logs and logs[-1]["status"] == "cancelled"
+
+
+# ── DL-027 turn_id / messageId / persistent parts ────────────────────────────
+
+
+async def test_start_frame_carries_message_id():
+    """start part 帶 messageId == gen_turn_id() 的回傳值。"""
+    user = User("u1", False)
+    parts = _json_parts(await _collect(chat_event_stream(_deps(), _norm(), user)))
+    start = parts[0]
+    assert start == {"type": "start", "messageId": FIXED_TURN}
+
+
+async def test_data_sources_has_no_transient_key():
+    """data-sources persistent（transient=False）→ 不含 transient 鍵。"""
+    user = User("u1", False)
+    parts = _json_parts(await _collect(chat_event_stream(_deps(), _norm(), user)))
+    src = next(p for p in parts if isinstance(p, dict) and p["type"] == "data-sources")
+    assert "transient" not in src
+
+
+async def test_data_verification_has_no_transient_key():
+    """data-verification persistent（transient=False）→ 不含 transient 鍵。"""
+    user = User("u1", False)
+    parts = _json_parts(await _collect(chat_event_stream(_deps(), _norm(), user)))
+    ver = next(p for p in parts if isinstance(p, dict) and p["type"] == "data-verification")
+    assert "transient" not in ver
+
+
+async def test_log_query_receives_turn_id_on_success():
+    """正常路徑 → log_query 收到 turn_id==FIXED_TURN。"""
+    logs: list = []
+    collected: list = []
+    deps = _deps(logs=logs, collected=collected)
+    await _collect(chat_event_stream(deps, _norm(), User("u1", False)))
+    await asyncio.gather(*collected)
+    assert logs and logs[-1].get("turn_id") == FIXED_TURN
+
+
+async def test_log_query_receives_turn_id_on_cache_hit():
+    """快取命中路徑 → log_query 收到 turn_id==FIXED_TURN。"""
+    class _HitCache(NoOpCache):
+        async def get(self, q, kb, metadata_filter=None):
+            return CachedAnswer(
+                answer="答案 [Gray, p.812]。",
+                sources=[{"book_title": "Gray", "edition": "42", "page": 812,
+                          "figure": None, "image_url": "u", "snippet": "s", "score": 0.9}],
+            )
+
+    logs: list = []
+    collected: list = []
+    deps = _deps(cache=_HitCache(), logs=logs, collected=collected)
+    await _collect(chat_event_stream(deps, _norm(), User("u1", False)))
+    await asyncio.gather(*collected)
+    assert logs and logs[-1].get("turn_id") == FIXED_TURN
+
+
+async def test_log_query_receives_turn_id_on_encoder_error():
+    """encoder_error 路徑 → log_query 收到 turn_id==FIXED_TURN。"""
+    class _BoomEncoder:
+        async def encode_query(self, text: str):
+            raise RuntimeError("boom")
+
+    logs: list = []
+    collected: list = []
+
+    async def _log(**kw):
+        logs.append(kw)
+
+    deps = ChatDeps(
+        encoder=_BoomEncoder(),
+        llm=MockLLMClient(tokens=["x"]),
+        cache=NoOpCache(),
+        retrieve_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("unreachable")),
+        sign_url=lambda u: f"https://signed/{u}",
+        fetch_bytes=_fetch_bytes,
+        log_query=_log,
+        spawn=lambda coro: collected.append(coro),
+        kb_version=1,
+        is_disconnected=_never_disconnected,
+        gen_turn_id=lambda: FIXED_TURN,
+    )
+    await _collect(chat_event_stream(deps, _norm(), User("u1", False)))
+    await asyncio.gather(*collected)
+    assert logs and logs[-1].get("turn_id") == FIXED_TURN
+
+
+async def test_log_query_receives_turn_id_on_retrieval_error():
+    """retrieval_error 路徑 → log_query 收到 turn_id==FIXED_TURN。"""
+    async def _boom(*a, **kw):
+        raise RuntimeError("boom")
+
+    logs: list = []
+    collected: list = []
+
+    async def _log(**kw):
+        logs.append(kw)
+
+    deps = ChatDeps(
+        encoder=MockEncoderClient(),
+        llm=MockLLMClient(tokens=["x"]),
+        cache=NoOpCache(),
+        retrieve_fn=_boom,
+        sign_url=lambda u: f"https://signed/{u}",
+        fetch_bytes=_fetch_bytes,
+        log_query=_log,
+        spawn=lambda coro: collected.append(coro),
+        kb_version=1,
+        is_disconnected=_never_disconnected,
+        gen_turn_id=lambda: FIXED_TURN,
+    )
+    await _collect(chat_event_stream(deps, _norm(), User("u1", False)))
+    await asyncio.gather(*collected)
+    assert logs and logs[-1].get("turn_id") == FIXED_TURN
+
+
+async def test_log_query_receives_turn_id_on_llm_error():
+    """llm_error 路徑 → log_query 收到 turn_id==FIXED_TURN。"""
+    class _BoomLLM:
+        async def stream_complete(self, *a, **kw):
+            raise RuntimeError("boom")
+            yield  # make it an async generator
+
+    logs: list = []
+    collected: list = []
+
+    async def _log(**kw):
+        logs.append(kw)
+
+    async def _retrieve_one(q, qr, mf, kb, n):
+        return [_result()]
+
+    deps = ChatDeps(
+        encoder=MockEncoderClient(),
+        llm=_BoomLLM(),
+        cache=NoOpCache(),
+        retrieve_fn=_retrieve_one,
+        sign_url=lambda u: f"https://signed/{u}",
+        fetch_bytes=_fetch_bytes,
+        log_query=_log,
+        spawn=lambda coro: collected.append(coro),
+        kb_version=1,
+        is_disconnected=_never_disconnected,
+        gen_turn_id=lambda: FIXED_TURN,
+    )
+    await _collect(chat_event_stream(deps, _norm(), User("u1", False)))
+    await asyncio.gather(*collected)
+    assert logs and logs[-1].get("turn_id") == FIXED_TURN
