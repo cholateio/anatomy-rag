@@ -1038,7 +1038,7 @@ JSONL，每行一題。一般題含 `id, category, query, expected_pages[], expe
 | `clinical_correlation` | 教科書臨床相關題（手術解剖、神經損傷風險、病理機轉） | 20 |
 | `out_of_scope` | 非解剖學提問（測「教材中查無此項」回應） | 10 |
 
-- **MUST**：總計 ≥ 110 題，由解剖學科教師/助教標註
+- **MUST**：總計 ≥ 110 題，由解剖學科教師/助教標註（**DL-028**：v1 由教師逐步補；未達標前 `golden_readiness` 於 CI 以 warning 呈現、**不阻 merge**，題庫補滿後由人工升為 hard gate）
 - **注意**：本系統移除「拒答臨床問題」的限制，故黃金題庫**沒有** `should_refuse` 類別。`out_of_scope` 測的是「題目不在教材範圍時系統正確說明『教材中查無此項』」，**不是**拒答臨床問題。
 
 ## 7.3 RAGAS 自動化評估
@@ -1054,7 +1054,7 @@ JSONL，每行一題。一般題含 `id, category, query, expected_pages[], expe
 CI：`eval.ragas --golden tests/golden_qa.jsonl --report eval_report.json` → `eval.gate --report ... --thresholds eval_thresholds.yaml`。
 
 **規則**：
-- **MUST**：每個 PR 跑 RAGAS，未達標阻擋 merge
+- **MUST**：每個 PR 跑 RAGAS，未達標阻擋 merge（**DL-028**：v1 每 PR 跑**框架/offline 決定性 gate**［零外呼叫，RAGAS_DO_NOT_TRACK］；**真實 RAGAS LLM-judge hard gate 為 `workflow_dispatch`**，需教師 ≥110 題 + `EVAL_OPENAI_KEY` + staging backend——教師題庫補滿前不阻 merge）
 - **MUST**：`eval_thresholds.yaml` 變更須有人工審核（防止偷偷降低門檻）
 - **MUST**：評估結果儲存至少 90 天
 - **SHOULD**：RAGAS 用獨立的「評估 LLM」（獨立 API key），不與線上服務共用
