@@ -50,7 +50,8 @@ def _deps(
     llm=None,
     cache=None,
     results=None,
-    logs=None,
+    begin_calls=None,  # collect log_begin kwargs (directly awaited, not spawned)
+    logs=None,         # collect log_finalize kwargs (spawned via collected)
     collected=None,
     is_disconnected=None,
     gen_turn_id=None,
@@ -70,7 +71,11 @@ def _deps(
     async def _retrieve(query, query_repr, metadata_filter, kb_version, top_n):
         return results if results is not None else [_result()]
 
-    async def _log(**kw):
+    async def _log_begin(**kw):
+        if begin_calls is not None:
+            begin_calls.append(kw)
+
+    async def _log_finalize(**kw):
         if logs is not None:
             logs.append(kw)
 
@@ -81,7 +86,8 @@ def _deps(
         retrieve_fn=_retrieve,
         sign_url=lambda u: f"https://signed/{u}",
         fetch_bytes=_fetch_bytes,
-        log_query=_log,
+        log_begin=_log_begin,
+        log_finalize=_log_finalize,
         spawn=_spawn,  # [F1/H] collect or close, never await
         kb_version=1,
         is_disconnected=is_disconnected or _never_disconnected,
@@ -284,7 +290,8 @@ async def test_disconnect_stops_streaming_early():
         retrieve_fn=_retrieve,
         sign_url=lambda u: f"https://signed/{u}",
         fetch_bytes=_fetch,
-        log_query=_log,
+        log_begin=_log,
+        log_finalize=_log,
         spawn=lambda coro: coro.close(),
         kb_version=1,
         is_disconnected=_disc,
@@ -412,6 +419,9 @@ async def test_encoder_error_emits_error_no_finish_ends_with_done():
     async def _log(**kw):
         logs.append(kw)
 
+    async def _noop_begin(**kw):
+        pass
+
     deps = ChatDeps(
         encoder=_BoomEncoder(),
         llm=MockLLMClient(tokens=["x"]),
@@ -419,7 +429,8 @@ async def test_encoder_error_emits_error_no_finish_ends_with_done():
         retrieve_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("should not reach")),
         sign_url=lambda u: f"https://signed/{u}",
         fetch_bytes=_fetch_bytes,
-        log_query=_log,
+        log_begin=_noop_begin,
+        log_finalize=_log,
         spawn=lambda coro: collected.append(coro),
         kb_version=1,
         is_disconnected=_never_disconnected,
@@ -448,6 +459,9 @@ async def test_retrieval_error_emits_error_no_finish_ends_with_done():
     async def _log(**kw):
         logs.append(kw)
 
+    async def _noop_begin(**kw):
+        pass
+
     deps = ChatDeps(
         encoder=MockEncoderClient(),
         llm=MockLLMClient(tokens=["x"]),
@@ -455,7 +469,8 @@ async def test_retrieval_error_emits_error_no_finish_ends_with_done():
         retrieve_fn=_boom_retrieve,
         sign_url=lambda u: f"https://signed/{u}",
         fetch_bytes=_fetch_bytes,
-        log_query=_log,
+        log_begin=_noop_begin,
+        log_finalize=_log,
         spawn=lambda coro: collected.append(coro),
         kb_version=1,
         is_disconnected=_never_disconnected,
@@ -501,6 +516,9 @@ async def test_disconnect_log_status_is_cancelled():
     async def _retrieve_one(query, query_repr, metadata_filter, kb_version, top_n):
         return [_result()]
 
+    async def _noop_begin(**kw):
+        pass
+
     async def _log(**kw):
         logs.append(kw)
 
@@ -511,7 +529,8 @@ async def test_disconnect_log_status_is_cancelled():
         retrieve_fn=_retrieve_one,
         sign_url=lambda u: f"https://signed/{u}",
         fetch_bytes=_fetch_bytes,
-        log_query=_log,
+        log_begin=_noop_begin,
+        log_finalize=_log,
         spawn=lambda coro: collected.append(coro),
         kb_version=1,
         is_disconnected=_disc,
@@ -577,13 +596,16 @@ async def test_log_query_receives_turn_id_on_cache_hit():
 
 
 async def test_log_query_receives_turn_id_on_encoder_error():
-    """encoder_error 路徑 → log_query 收到 turn_id==FIXED_TURN。"""
+    """encoder_error 路徑 → log_finalize 收到 turn_id==FIXED_TURN。"""
     class _BoomEncoder:
         async def encode_query(self, text: str):
             raise RuntimeError("boom")
 
     logs: list = []
     collected: list = []
+
+    async def _noop_begin(**kw):
+        pass
 
     async def _log(**kw):
         logs.append(kw)
@@ -595,7 +617,8 @@ async def test_log_query_receives_turn_id_on_encoder_error():
         retrieve_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("unreachable")),
         sign_url=lambda u: f"https://signed/{u}",
         fetch_bytes=_fetch_bytes,
-        log_query=_log,
+        log_begin=_noop_begin,
+        log_finalize=_log,
         spawn=lambda coro: collected.append(coro),
         kb_version=1,
         is_disconnected=_never_disconnected,
@@ -607,12 +630,15 @@ async def test_log_query_receives_turn_id_on_encoder_error():
 
 
 async def test_log_query_receives_turn_id_on_retrieval_error():
-    """retrieval_error 路徑 → log_query 收到 turn_id==FIXED_TURN。"""
+    """retrieval_error 路徑 → log_finalize 收到 turn_id==FIXED_TURN。"""
     async def _boom(*a, **kw):
         raise RuntimeError("boom")
 
     logs: list = []
     collected: list = []
+
+    async def _noop_begin(**kw):
+        pass
 
     async def _log(**kw):
         logs.append(kw)
@@ -624,7 +650,8 @@ async def test_log_query_receives_turn_id_on_retrieval_error():
         retrieve_fn=_boom,
         sign_url=lambda u: f"https://signed/{u}",
         fetch_bytes=_fetch_bytes,
-        log_query=_log,
+        log_begin=_noop_begin,
+        log_finalize=_log,
         spawn=lambda coro: collected.append(coro),
         kb_version=1,
         is_disconnected=_never_disconnected,
@@ -636,7 +663,7 @@ async def test_log_query_receives_turn_id_on_retrieval_error():
 
 
 async def test_log_query_receives_turn_id_on_llm_error():
-    """llm_error 路徑 → log_query 收到 turn_id==FIXED_TURN。"""
+    """llm_error 路徑 → log_finalize 收到 turn_id==FIXED_TURN。"""
     class _BoomLLM:
         async def stream_complete(self, *a, **kw):
             raise RuntimeError("boom")
@@ -644,6 +671,9 @@ async def test_log_query_receives_turn_id_on_llm_error():
 
     logs: list = []
     collected: list = []
+
+    async def _noop_begin(**kw):
+        pass
 
     async def _log(**kw):
         logs.append(kw)
@@ -658,7 +688,8 @@ async def test_log_query_receives_turn_id_on_llm_error():
         retrieve_fn=_retrieve_one,
         sign_url=lambda u: f"https://signed/{u}",
         fetch_bytes=_fetch_bytes,
-        log_query=_log,
+        log_begin=_noop_begin,
+        log_finalize=_log,
         spawn=lambda coro: collected.append(coro),
         kb_version=1,
         is_disconnected=_never_disconnected,
@@ -667,3 +698,176 @@ async def test_log_query_receives_turn_id_on_llm_error():
     await _collect(chat_event_stream(deps, _norm(), User("u1", False)))
     await asyncio.gather(*collected)
     assert logs and logs[-1].get("turn_id") == FIXED_TURN
+
+
+# ── begin / finalize 分工契約 ─────────────────────────────────────────────────
+
+
+async def test_log_begin_called_once_before_any_yield_on_success():
+    """正常路徑：log_begin 恰好呼叫一次，帶 turn_id / user_id / query；
+    log_finalize spawn status=ok cache_hit=False。"""
+    begin_calls: list = []
+    logs: list = []
+    collected: list = []
+    user = User("u-begin-test", False)
+    norm = _norm(query="肱二頭肌起點？")
+
+    deps = _deps(begin_calls=begin_calls, logs=logs, collected=collected)
+    await _collect(chat_event_stream(deps, norm, user))
+    await asyncio.gather(*collected)
+
+    assert len(begin_calls) == 1, "log_begin 應恰好呼叫一次"
+    assert begin_calls[0]["turn_id"] == FIXED_TURN
+    assert begin_calls[0]["user_id"] == "u-begin-test"
+    assert begin_calls[0]["query"] == "肱二頭肌起點？"
+
+    assert logs and logs[-1]["turn_id"] == FIXED_TURN
+    assert logs[-1]["status"] == "ok"
+    assert logs[-1].get("cache_hit") in (False, None)
+
+
+async def test_log_begin_called_once_on_cache_hit():
+    """快取命中路徑：log_begin 恰好呼叫一次；log_finalize spawn cache_hit=True, status=ok。"""
+    class _HitCache(NoOpCache):
+        async def get(self, q, kb, metadata_filter=None):
+            return CachedAnswer(
+                answer="快取答案 [Gray, p.812]。",
+                sources=[{
+                    "book_title": "Gray", "edition": "42", "page": 812,
+                    "figure": None, "image_url": "u", "snippet": "s", "score": 0.9,
+                }],
+            )
+
+    begin_calls: list = []
+    logs: list = []
+    collected: list = []
+    user = User("u-cache-begin", False)
+
+    deps = _deps(cache=_HitCache(), begin_calls=begin_calls, logs=logs, collected=collected)
+    await _collect(chat_event_stream(deps, _norm(), user))
+    await asyncio.gather(*collected)
+
+    assert len(begin_calls) == 1
+    assert begin_calls[0]["turn_id"] == FIXED_TURN
+    assert begin_calls[0]["user_id"] == "u-cache-begin"
+
+    assert logs and logs[-1]["status"] == "ok"
+    assert logs[-1].get("cache_hit") is True
+
+
+async def test_log_finalize_spawned_with_encoder_error_status():
+    """encoder_error 路徑：log_begin 呼叫一次；log_finalize spawn status='encoder_error'。"""
+    class _BoomEncoder:
+        async def encode_query(self, text: str):
+            raise RuntimeError("boom")
+
+    begin_calls: list = []
+    logs: list = []
+    collected: list = []
+
+    async def _begin(**kw):
+        begin_calls.append(kw)
+
+    async def _fin(**kw):
+        logs.append(kw)
+
+    deps = ChatDeps(
+        encoder=_BoomEncoder(),
+        llm=MockLLMClient(tokens=["x"]),
+        cache=NoOpCache(),
+        retrieve_fn=lambda *a, **kw: (_ for _ in ()).throw(AssertionError("unreachable")),
+        sign_url=lambda u: f"https://signed/{u}",
+        fetch_bytes=_fetch_bytes,
+        log_begin=_begin,
+        log_finalize=_fin,
+        spawn=lambda coro: collected.append(coro),
+        kb_version=1,
+        is_disconnected=_never_disconnected,
+        gen_turn_id=lambda: FIXED_TURN,
+    )
+    await _collect(chat_event_stream(deps, _norm(), User("u1", False)))
+    await asyncio.gather(*collected)
+
+    assert len(begin_calls) == 1
+    assert begin_calls[0]["turn_id"] == FIXED_TURN
+    assert logs and logs[-1]["status"] == "encoder_error"
+    assert logs[-1].get("cache_hit") in (False, None)
+
+
+async def test_log_finalize_spawned_with_retrieval_error_status():
+    """retrieval_error 路徑：log_begin 呼叫一次；log_finalize spawn status='retrieval_error'。"""
+    async def _boom(*a, **kw):
+        raise RuntimeError("boom")
+
+    begin_calls: list = []
+    logs: list = []
+    collected: list = []
+
+    async def _begin(**kw):
+        begin_calls.append(kw)
+
+    async def _fin(**kw):
+        logs.append(kw)
+
+    deps = ChatDeps(
+        encoder=MockEncoderClient(),
+        llm=MockLLMClient(tokens=["x"]),
+        cache=NoOpCache(),
+        retrieve_fn=_boom,
+        sign_url=lambda u: f"https://signed/{u}",
+        fetch_bytes=_fetch_bytes,
+        log_begin=_begin,
+        log_finalize=_fin,
+        spawn=lambda coro: collected.append(coro),
+        kb_version=1,
+        is_disconnected=_never_disconnected,
+        gen_turn_id=lambda: FIXED_TURN,
+    )
+    await _collect(chat_event_stream(deps, _norm(), User("u1", False)))
+    await asyncio.gather(*collected)
+
+    assert len(begin_calls) == 1
+    assert begin_calls[0]["turn_id"] == FIXED_TURN
+    assert logs and logs[-1]["status"] == "retrieval_error"
+
+
+async def test_log_finalize_spawned_with_llm_error_status():
+    """llm_error 路徑：log_begin 呼叫一次；log_finalize spawn status='llm_error'。"""
+    class _BoomLLM:
+        async def stream_complete(self, *a, **kw):
+            raise RuntimeError("boom")
+            yield  # make it an async generator
+
+    begin_calls: list = []
+    logs: list = []
+    collected: list = []
+
+    async def _begin(**kw):
+        begin_calls.append(kw)
+
+    async def _fin(**kw):
+        logs.append(kw)
+
+    async def _retrieve_one(q, qr, mf, kb, n):
+        return [_result()]
+
+    deps = ChatDeps(
+        encoder=MockEncoderClient(),
+        llm=_BoomLLM(),
+        cache=NoOpCache(),
+        retrieve_fn=_retrieve_one,
+        sign_url=lambda u: f"https://signed/{u}",
+        fetch_bytes=_fetch_bytes,
+        log_begin=_begin,
+        log_finalize=_fin,
+        spawn=lambda coro: collected.append(coro),
+        kb_version=1,
+        is_disconnected=_never_disconnected,
+        gen_turn_id=lambda: FIXED_TURN,
+    )
+    await _collect(chat_event_stream(deps, _norm(), User("u1", False)))
+    await asyncio.gather(*collected)
+
+    assert len(begin_calls) == 1
+    assert begin_calls[0]["turn_id"] == FIXED_TURN
+    assert logs and logs[-1]["status"] == "llm_error"

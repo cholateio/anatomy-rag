@@ -3,10 +3,11 @@
 可測核心 chat_event_stream（注入 deps，零框架/IO 綁定），route 層做
 auth + ratelimit + 正規化 + EventSourceResponse。
 
-流程：快取（追問跳過）→ encode（追問串接 retrieval_q）→ 檢索（連線於 retrieve_fn
+流程：串流開始即 await log_begin（建 turn 列）→ 快取（追問跳過）→
+encode（追問串接 retrieval_q）→ 檢索（連線於 retrieve_fn
 內歸還，不跨串流 DL-012）→ [F5/H] async 並行抓影像 bytes + 建引文（串流前完成）→
 先送 sources → 串流 LLM（user_id 入 forbidden_identifiers）→ [F8/M] 錯誤短路 →
-驗證引文（data-verification）→ finish/[DONE] → [F1/H] spawn log/cache.set（
+驗證引文（data-verification）→ finish/[DONE] → [F1/H] spawn log_finalize/cache.set（
 追問且通過驗證才寫 [F2/H]）。
 """
 from __future__ import annotations
@@ -35,16 +36,21 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 _TEXT_ID = "t0"
 
-# DB CHECK 合法值（migration 005）——與 main._log_query 共用，防止 split-brain。
+# DB CHECK 合法值（migration 005）——與 main._log_begin/_log_finalize 共用，防止 split-brain。
 ALLOWED_LOG_STATUSES = ("ok", "llm_error", "encoder_error", "retrieval_error", "cancelled")
+
+
+def _new_turn_id() -> str:
+    return str(uuid.uuid4())
 
 
 @dataclass
 class ChatDeps:
     """注入式依賴容器（可測核心，零框架綁定）。
 
-    [F1/H] spawn: 後串流副作用（log/cache.set）MUST 透過 spawn 非同步提交，
+    [F1/H] spawn: 後串流副作用（log_finalize/cache.set）MUST 透過 spawn 非同步提交，
     production 用 asyncio.create_task，測試用 collected.append。
+    log_begin 為串流開始的同步 await（確保 turn 列在任何 SSE 事件前建立）。
     [F5/H] fetch_bytes: async callable（S3/MinIO）；build_citations_and_images 串流前完成。
     """
 
@@ -54,13 +60,14 @@ class ChatDeps:
     retrieve_fn: Callable[..., Awaitable[list[RetrievalResult]]]
     sign_url: Callable[[str], str]
     fetch_bytes: Callable[[str], Awaitable[bytes]]  # [F5/H] async
-    log_query: Callable[..., Awaitable[None]]
+    log_begin: Callable[..., Awaitable[None]]   # 串流開始即建 turn 列（await，fail-soft）
+    log_finalize: Callable[..., Awaitable[None]]  # 串流結尾更新終態（spawn via [F1/H]）
     spawn: Callable[[Awaitable], None]  # [F1/H] detach side-effects
     kb_version: int
     is_disconnected: Callable[[], Awaitable[bool]]
     top_n: int = 3
     tracer: Tracer = field(default_factory=NoOpTracer)
-    gen_turn_id: Callable[[], str] = field(default_factory=lambda: (lambda: str(uuid.uuid4())))
+    gen_turn_id: Callable[[], str] = field(default_factory=lambda: _new_turn_id)
 
 
 def _intent(normalized: NormalizedChat) -> QueryIntent:
@@ -96,6 +103,13 @@ async def chat_event_stream(
         metadata={"is_followup": normalized.is_followup, "kb_version": kb},
     ):
         turn_id = deps.gen_turn_id()
+        # ── 串流開始即建 turn 列（log_begin 同步 await，確保 /feedback 可純 UPDATE）──
+        await deps.log_begin(
+            turn_id=turn_id,
+            user_id=user.user_id,
+            query=normalized.query,
+            conversation_id=normalized.conversation_id,
+        )
         # ── Step 1：快取（追問 MUST NOT 查/寫，DL-021）──────────────────────────
         if not normalized.is_followup:
             cached = await deps.cache.get(normalized.query, kb, normalized.metadata_filter)
@@ -110,16 +124,9 @@ async def chat_event_stream(
                 yield ais.sse_event(ais.finish_part())
                 yield ais.done_event()
                 deps.tracer.score("cache_hit", 1.0)
-                # [F1/H] spawn log，永不 await
+                # [F1/H] spawn log_finalize，永不 await（begin 已在串流開始前 await）
                 deps.spawn(
-                    deps.log_query(
-                        user_id=user.user_id,
-                        query=normalized.query,
-                        conversation_id=normalized.conversation_id,
-                        cache_hit=True,
-                        status="ok",
-                        turn_id=turn_id,
-                    )
+                    deps.log_finalize(turn_id=turn_id, status="ok", cache_hit=True)
                 )
                 return
 
@@ -142,14 +149,7 @@ async def chat_event_stream(
             yield ais.sse_event({"type": "error", "errorText": "服務暫時無法使用，請稍後再試"})
             yield ais.done_event()
             deps.spawn(
-                deps.log_query(
-                    user_id=user.user_id,
-                    query=normalized.query,
-                    conversation_id=normalized.conversation_id,
-                    cache_hit=False,
-                    status="encoder_error",
-                    turn_id=turn_id,
-                )
+                deps.log_finalize(turn_id=turn_id, status="encoder_error", cache_hit=False)
             )
             return
 
@@ -168,14 +168,7 @@ async def chat_event_stream(
             yield ais.sse_event({"type": "error", "errorText": "服務暫時無法使用，請稍後再試"})
             yield ais.done_event()
             deps.spawn(
-                deps.log_query(
-                    user_id=user.user_id,
-                    query=normalized.query,
-                    conversation_id=normalized.conversation_id,
-                    cache_hit=False,
-                    status="retrieval_error",
-                    turn_id=turn_id,
-                )
+                deps.log_finalize(turn_id=turn_id, status="retrieval_error", cache_hit=False)
             )
             return
 
@@ -217,17 +210,9 @@ async def chat_event_stream(
             status = "llm_error"
             yield ais.sse_event(ais.text_end_part(_TEXT_ID))
             yield ais.done_event()
-            # [F1/H] spawn log，MUST NOT emit finish/verification
+            # [F1/H] spawn log_finalize，MUST NOT emit finish/verification
             deps.spawn(
-                deps.log_query(
-                    user_id=user.user_id,
-                    query=normalized.query,
-                    conversation_id=normalized.conversation_id,
-                    cache_hit=False,
-                    status="llm_error",
-                    model_used=None,
-                    turn_id=turn_id,
-                )
+                deps.log_finalize(turn_id=turn_id, status="llm_error", model_used=None)
             )
             return  # 跳過 verification 和 finish
 
@@ -258,15 +243,7 @@ async def chat_event_stream(
 
         # [F1/H] spawn 副作用，永不 await（SSE 已送完）
         deps.spawn(
-            deps.log_query(
-                user_id=user.user_id,
-                query=normalized.query,
-                conversation_id=normalized.conversation_id,
-                cache_hit=False,
-                status=status,
-                model_used=None,
-                turn_id=turn_id,
-            )
+            deps.log_finalize(turn_id=turn_id, status=status, model_used=None)
         )
         # [F2/H] cache.set 僅在非追問 + ok + all_grounded（防快取偽造引文答案）
         # 已知限制（Codex 終審 P2#1，待真實 S3 接線）：image_url 為 sign_url 產物；

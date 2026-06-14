@@ -184,6 +184,53 @@ def test_parse_feedback_non_string_text_raises():
         parse_feedback_body({"message_id": cid, "rating": 1, "text": 123})
 
 
+# ── M2：空字串 / 純空白 text → ValueError（路由轉 400）────────────────────────
+
+
+def test_parse_feedback_body_empty_text_raises():
+    """text 為空字串 → ValueError（M2：空值不可接受）。"""
+    with pytest.raises(ValueError):
+        parse_feedback_body({"message_id": str(uuid.uuid4()), "rating": 1, "text": ""})
+
+
+def test_parse_feedback_body_whitespace_text_raises():
+    """text 為純空白 → ValueError（M2）。"""
+    with pytest.raises(ValueError):
+        parse_feedback_body({"message_id": str(uuid.uuid4()), "rating": 1, "text": "   "})
+
+
+# ── M1：writer 拋 DB 例外 → 路由 HTTP 500 ───────────────────────────────────
+
+
+async def test_feedback_route_writer_exception_returns_500():
+    """writer 拋 DB 例外 → HTTP 500（不被吞成 404，M1）。"""
+    from anatomy_backend.api.auth import User, get_current_user
+    from anatomy_backend.api.main import app
+
+    app.dependency_overrides[get_current_user] = lambda: User("u1", False)
+
+    async def _boom(**kw) -> bool:
+        raise RuntimeError("DB connection lost")
+
+    app.state.write_feedback = _boom
+    try:
+        # raise_app_exceptions=False：讓 Starlette ServerErrorMiddleware 將未捕獲例外
+        # 轉為 HTTP 500，而非在 httpx 層重拋（預設 raise_app_exceptions=True）。
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as ac:
+            resp = await ac.post(
+                "/feedback",
+                json={"message_id": FIXED_TURN, "rating": 1},
+            )
+        assert resp.status_code == 500
+    finally:
+        del app.dependency_overrides[get_current_user]
+        try:
+            delattr(app.state, "write_feedback")
+        except AttributeError:
+            pass
+
+
 # ── DL-027：writer 回 False → 路由 404 ─────────────────────────────────────
 
 

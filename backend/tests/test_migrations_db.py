@@ -53,10 +53,9 @@ def test_pgvector_version_at_least_0_8(migrated_db):
     assert (major, minor) >= (0, 8), f"pgvector {ver} < 0.8"
 
 
-def test_008_turn_id_schema(alembic_cfg):
+def test_008_turn_id_schema(alembic_cfg, migrated_db):
     """008 migration：turn_id 欄位型別、UNIQUE 索引、多 NULL 共存、重複非 NULL 拒絕。"""
     import asyncpg
-    from alembic import command
 
     async def _go():
         conn = await asyncpg.connect(os.environ["DATABASE_URL"], statement_cache_size=0)

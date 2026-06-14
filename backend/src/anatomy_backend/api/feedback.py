@@ -53,6 +53,8 @@ def parse_feedback_body(body: dict) -> FeedbackInput:
     text = body.get("text")
     if text is not None and not isinstance(text, str):
         raise ValueError(f"text 須為字串或省略，收到 {type(text).__name__}")
+    if text is not None and not text.strip():
+        raise ValueError("text 不可為空字串或純空白（M2）")
     return FeedbackInput(
         message_id=str(mid),
         rating=int(rating_raw),  # non-numeric → ValueError；None 已上方攔截

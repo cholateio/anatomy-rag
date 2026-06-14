@@ -141,52 +141,42 @@ async def lifespan(app: FastAPI):
         _shared_http = None
 
     # ── DB write helpers ───────────────────────────────────────────────────
-    async def _log_query(*, user_id, query, conversation_id=None, cache_hit=False,
-                         status="ok", model_used=None, turn_id=None, **_kw):
+    async def _log_begin(*, turn_id, user_id, query, conversation_id=None):
+        """串流開始即建 turn 列（含真 user_id），使 /feedback 可純 UPDATE。fail-soft。"""
         try:
             async with pool.acquire() as conn:
-                _sql = (
-                    "INSERT INTO query_logs "
-                    "(user_id, query_text, conversation_id, cache_hit,"
-                    " status, model_used, turn_id) "
-                    "VALUES ($1::uuid, $2, $3::uuid, $4, $5, $6, $7::uuid) "
-                    "ON CONFLICT (turn_id) DO UPDATE SET "
-                    "query_text=EXCLUDED.query_text,"
-                    " conversation_id=EXCLUDED.conversation_id,"
-                    " cache_hit=EXCLUDED.cache_hit,"
-                    " status=EXCLUDED.status,"
-                    " model_used=EXCLUDED.model_used"
-                )
                 await conn.execute(
-                    _sql,
-                    user_id, query, conversation_id, cache_hit,
-                    status if status in ALLOWED_LOG_STATUSES else "ok",
-                    model_used, turn_id,
+                    "INSERT INTO query_logs (turn_id, user_id, query_text, conversation_id) "
+                    "VALUES ($1::uuid, $2::uuid, $3, $4::uuid) ON CONFLICT (turn_id) DO NOTHING",
+                    turn_id, user_id, query, conversation_id,
                 )
         except Exception:
-            logger.warning("query_logs INSERT 失敗", exc_info=True)
+            logger.warning("query_logs begin INSERT 失敗", exc_info=True)
+
+    async def _log_finalize(*, turn_id, status="ok", cache_hit=False, model_used=None):
+        """串流結尾更新該回合終態。fail-soft。"""
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE query_logs SET status=$2, cache_hit=$3, model_used=$4 "
+                    "WHERE turn_id=$1::uuid",
+                    turn_id, status if status in ALLOWED_LOG_STATUSES else "ok",
+                    cache_hit, model_used,
+                )
+        except Exception:
+            logger.warning("query_logs finalize UPDATE 失敗", exc_info=True)
 
     async def _write_feedback(*, user_id, message_id, rating, text) -> bool:
-        try:
-            async with pool.acquire() as conn:
-                _fb_sql = (
-                    "INSERT INTO query_logs"
-                    " (turn_id, user_id, query_text, feedback, feedback_text)"
-                    " VALUES ($3::uuid, $4::uuid, '', $1, $2)"
-                    " ON CONFLICT (turn_id) DO UPDATE SET"
-                    " feedback=EXCLUDED.feedback,"
-                    " feedback_text=EXCLUDED.feedback_text"
-                    " WHERE query_logs.user_id = $4::uuid"
-                    " RETURNING turn_id"
-                )
-                row = await conn.fetchrow(
-                    _fb_sql,
-                    rating, text, message_id, user_id,
-                )
-            return row is not None
-        except Exception:
-            logger.warning("feedback upsert 失敗", exc_info=True)
-            return False
+        """純 UPDATE——turn 列由 log_begin 預建，故此處 UPDATE 不符條件即回 False→404。
+        DB 例外不吞（讓 FastAPI 回 500，M1）。
+        """
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "UPDATE query_logs SET feedback=$1, feedback_text=$2 "
+                "WHERE turn_id=$3::uuid AND user_id=$4::uuid RETURNING turn_id",
+                rating, text, message_id, user_id,
+            )
+        return row is not None
 
     # ── retrieve wrapper ───────────────────────────────────────────────────
     from anatomy_backend.retrieval.orchestrator import retrieve
@@ -203,7 +193,8 @@ async def lifespan(app: FastAPI):
             retrieve_fn=_retrieve,
             sign_url=sign_url,
             fetch_bytes=fetch_bytes,
-            log_query=_log_query,
+            log_begin=_log_begin,
+            log_finalize=_log_finalize,
             spawn=_spawn,
             kb_version=settings.active_kb_version,
             is_disconnected=request.is_disconnected,
