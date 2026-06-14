@@ -99,6 +99,8 @@ services:
     build: { context: ./frontend, dockerfile: Dockerfile }   # 前端自足：context 為 ./frontend（非根；backend 才需根 context 取 workspace 成員）
     depends_on: { backend: { condition: service_healthy } }
     ports: ["3000:3000"]
+    environment:
+      BACKEND_ORIGIN: "http://backend:8000"
     healthcheck:
       # localhost 在容器內先解析到 IPv6 ::1，但 Next.js standalone 綁 IPv4 0.0.0.0 →
       # busybox wget 連 ::1 被拒且不 fallback IPv4。改用 node 內建 http 打 127.0.0.1 並驗 200
