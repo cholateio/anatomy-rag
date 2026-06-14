@@ -11,6 +11,7 @@ describe("postFeedback", () => {
     expect(url).toBe("/feedback");
     expect(init.method).toBe("POST");
     expect(JSON.parse(init.body)).toEqual({ message_id: FIXED_TURN, rating: -1, text: "錯" });
+    expect(init.credentials).toBe("omit");
   });
   it("throws on non-ok response", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("", { status: 404 })));

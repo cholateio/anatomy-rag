@@ -111,9 +111,16 @@ function AssistantBubble({
       </div>
 
       {/* Unverified banner ────────────────────────────────────────────────── */}
-      {verificationData && (
+      {/* §6.7 / D-N: show banner whenever verification is present, OR when the
+          answer has text but no verification part arrived and streaming is done
+          (e.g. mid-stream LLM error — partial text + sources, no data-verification).
+          During active streaming (isStreaming === true) suppress the fallback so
+          it does not flash before the real verification event arrives. */}
+      {(verificationData || (text && !isStreaming)) && (
         <div className="mb-3">
-          <UnverifiedBanner data={verificationData} />
+          <UnverifiedBanner
+            data={verificationData ?? { verified: false, has_citations: false, unverified: [] }}
+          />
         </div>
       )}
 

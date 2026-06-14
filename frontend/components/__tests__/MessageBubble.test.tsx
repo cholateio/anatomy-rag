@@ -35,8 +35,10 @@ const sources: SourcesData = {
 function makeAssistantMsg(overrides?: {
   verificationData?: { verified: boolean; has_citations: boolean; unverified: string[] };
   hasSources?: boolean;
+  /** Set to false to omit the data-verification part entirely (simulates mid-stream error path). */
+  hasVerification?: boolean;
 }): AnatomyUIMessage {
-  const { verificationData, hasSources = true } = overrides ?? {};
+  const { verificationData, hasSources = true, hasVerification = true } = overrides ?? {};
   return {
     id: "00000000-0000-0000-0000-000000000001",
     role: "assistant",
@@ -48,14 +50,18 @@ function makeAssistantMsg(overrides?: {
         type: "text" as never,
         text: "起於喙突 [Gray, p.812, Fig.7-23]。" as never,
       },
-      {
-        type: "data-verification" as never,
-        data: (verificationData ?? {
-          verified: false,
-          has_citations: true,
-          unverified: ["[X, p.1]"],
-        }) as never,
-      },
+      ...(hasVerification
+        ? [
+            {
+              type: "data-verification" as never,
+              data: (verificationData ?? {
+                verified: false,
+                has_citations: true,
+                unverified: ["[X, p.1]"],
+              }) as never,
+            },
+          ]
+        : []),
     ],
     metadata: undefined as never,
   } as AnatomyUIMessage;
@@ -115,6 +121,34 @@ describe("MessageBubble — assistant", () => {
   it("does NOT show streaming cursor when isStreaming=false even if status=streaming (M7)", () => {
     render(<MessageBubble message={makeAssistantMsg()} status="streaming" isStreaming={false} />);
     expect(screen.queryByTestId("streaming-cursor")).not.toBeInTheDocument();
+  });
+
+  // ── HIGH 1: fallback banner when verification absent on a finished answer ──
+
+  it("HIGH 1 (a): shows conservative fallback banner when answer has text+sources but NO data-verification and isStreaming=false", () => {
+    const msg = makeAssistantMsg({ hasVerification: false });
+    render(<MessageBubble message={msg} status="error" isStreaming={false} />);
+    // The fallback {verified:false, has_citations:false} triggers the blue info banner
+    expect(screen.getByRole("alert")).toBeInTheDocument();
+    expect(screen.getByText(/請以教材核對/)).toBeInTheDocument();
+  });
+
+  it("HIGH 1 (b): does NOT show fallback banner when isStreaming=true even without data-verification (pending stream)", () => {
+    const msg = makeAssistantMsg({ hasVerification: false });
+    render(<MessageBubble message={msg} status="streaming" isStreaming={true} />);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("HIGH 1 (c) regression: assistant with verified=true verification → NO banner", () => {
+    render(
+      <MessageBubble
+        message={makeAssistantMsg({
+          verificationData: { verified: true, has_citations: true, unverified: [] },
+        })}
+        status="ready"
+      />,
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("still shows citation empty-state and watermark when no data-sources part (C1)", () => {
