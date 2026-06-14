@@ -560,3 +560,27 @@ DL-011 定觀測先 LangFuse+Sentry、Prometheus 延後；D-M 定改 Sentry/Lang
 - §7.5 告警目前僅邏輯+介面；接真實 metrics 來源、排程與通知管道屬部署/ops（後續 phase 或 runbook）。
 - LangFuse 端只能以假名分群追蹤；要對應回原始學號須在受控環境以同 salt 重算 hash（啟用 LangFuse MUST 設高熵 `langfuse_user_id_salt`）。
 - **Sentry 後端選擇（ops 後續，先問）**：`sentry-sdk` client 免費已在 deps；後端可走 SaaS 免費 Developer tier（5K errors/月、超量靜默丟棄）或**自託管 GlitchTip**（4 容器、相容 Sentry SDK、改 DSN 即可，符合資料存校內治理）。本設計 error-only + 脫敏，量小，免費 tier 多半足夠。
+
+---
+
+## DL-027: Phase 10 前端協定落地——per-turn turn_id（start.messageId）+ data parts 改 persistent + 回饋 begin-at-start + dump-golden 解耦
+
+- **狀態**：APPROVED（委派）　**提案者**：main Claude（Phase 10，含 Codex 對抗式審查修訂）　**日期**：2026-06-14　**裁決者**：專案負責人（前端 UX 規劃核可 + autonomy 授權技術/DB 修正）
+- **影響檔案**：ARCHITECTURE.md §5.6/§5.7/§6.7；`backend/.../api/{chat,main,feedback}.py`、`db/migrations/versions/008_query_logs_turn_id.py`；`infra/golden/{ai_stream_golden.jsonl, ai_stream_wire_sample.json}`、`frontend/scripts/dump-golden-stream.mjs`；`frontend/`（Next.js useChat 前端）
+
+### 背景
+Phase 10 前端以 Vercel AI SDK v6 `useChat` 接後端手刻 UI-message-stream（DL-018）。落地需定：(a) §6.7 per-turn 👍/👎 的回合識別；(b) `data-sources`/`data-verification` 的 persistent vs transient；(c) dump-golden 腳本與後端 golden 同路徑會互蓋。
+
+### 提案（與 DL-016/018/021、D-H/D-N 一致；屬落地記錄＋技術修正，autonomy 授權內）
+1. **per-turn turn_id**：後端每回合生 `turn_id`(UUID)→放進 SSE `start.messageId`（前端 useChat 以此設 `message.id`，已 pin-verify 實證成立）；`query_logs` 加 `turn_id` 欄（migration 008，nullable+UNIQUE）；`/feedback` 改以 `message_id`(=turn_id) 更新單列（取代 conversation_id 整串）。
+2. **回饋寫入 begin-at-start（Opus+Codex 雙審 H1/H2/M1 修正）**：turn 列在串流開始即同步建立（含真 user_id，fail-soft）；5 路徑結尾 spawn finalize 更新終態；`_write_feedback` 純 `UPDATE … WHERE turn_id AND user_id`（0 列→404、DB 例外→500）。化解「feedback 早於 fire-and-forget log」race ＋ 未知 UUID 孤兒列 ＋ 跨 user 所有權劫持 ＋ DB 例外被當 404。
+3. **data parts 改 persistent**：`data-sources`/`data-verification` 去 `transient`→進 `message.parts`，前端依 `part.type` 渲染、SDK 自動綁回合（符合 roadmap D-H「persistent part」）。
+4. **dump-golden 解耦**：dump 腳本輸出改寫 `infra/golden/ai_stream_wire_sample.json`（協定參考樣本）；後端位元組基準 `ai_stream_golden.jsonl` 由 `test_api_chat_sse_unit.py` 手工維護、腳本不再覆寫；並修腳本範例 payload key `citations`→`sources`（對齊後端 `{sources:[…]}`）。
+5. **前端套件**：TailwindCSS v4 + shadcn/ui(new-york) + Radix + next-themes + Vitest/Testing Library（使用者 2026-06-14 核可）；npm `--legacy-peer-deps`；提交 `package-lock.json`（D-S）；Next16 Turbopack（不加 webpack config）。
+6. **API proxy**：前端 `next.config` rewrites `/chat`·`/feedback`·`/warmup` → `BACKEND_ORIGIN`（compose `backend:8000`），同源、免 CORS。
+7. **免登入 v1**：沿用 DL-016 dev stub `user_id`；前端無登入 UI、transport 不送 credentials。
+8. **dev 頁圖**：`image_url` 在 mock 下指向 `localhost:9000`（無 seed 會 404）→ 前端 `<img onError>` 換本地佔位圖；真實圖待 S3/boto3 接線（延後）。
+
+### 後果
+- §5.6 start frame 由「無 messageId」→帶 `messageId`(turn_id)；§5.7 feedback 契約由 conversation_id→message_id；golden 同步更新。皆可逆、不動檢索/LLM 核心、RAGAS 不受影響。
+- **已知延後/限制**：begin-at-start 在「硬 ASGI 取消」時該回合 `status` 可能停在預設 `ok`（backlog；較舊設計嚴格更好——舊設計硬取消連列都不記）；SSE 經 Next rewrites 的串流保真於 **Part 8 compose smoke** 實測；db-tier（migration 008 + feedback SQL）於 **db-integration job** 驗；真實 S3 頁圖 + presign 過期（DL-025 P2）待 boto3 接線。

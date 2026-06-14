@@ -2,10 +2,11 @@
  * dump-golden-stream.mjs
  *
  * 用已安裝的 ai@6.0.197 套件，產生一段代表性的 UI Message Stream，
- * 並將真實 SSE wire bytes 寫入 infra/golden/ai_stream_golden.jsonl。
+ * 並將真實 SSE wire bytes 寫入 infra/golden/ai_stream_wire_sample.json（協定參考樣本）。
  *
- * 此腳本為 Phase 8 後端 Python SSE emitter 的對照基準（DL-018）。
- * 請勿手動編輯 golden 檔案——應執行此腳本重新產生。
+ * 此檔為「真 SDK wire 協定參考樣本」（DL-018 / DL-027）。
+ * ⚠️ 後端 emitter 的位元組對照基準是 infra/golden/ai_stream_golden.jsonl，
+ *    由 backend/tests/test_api_chat_sse_unit.py 手工維護——本腳本 MUST NOT 覆寫它。
  *
  * 執行：cd frontend && node scripts/dump-golden-stream.mjs
  *
@@ -31,7 +32,7 @@ import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
 
-// ---------- 代表性的 citation 物件（Phase 8 後端會產生相同結構）----------
+// ---------- 代表性的 citation 物件（後端 data-sources 的 payload 形狀為 { sources: [...] }）----------
 const EXAMPLE_CITATIONS = [
   {
     book_title: "Gray42",
@@ -59,10 +60,10 @@ const stream = createUIMessageStream({
     writer.write({ type: "start" });
 
     // 2. 自訂 data part：傳遞引文清單給前端
-    //    type 格式為 `data-${NAME}`，payload 放在 data 欄位（DataUIMessageChunk）
+    //    type 格式為 `data-${NAME}`，payload 放在 data 欄位；後端契約 key 為 sources（非 citations）
     writer.write({
       type: "data-sources",
-      data: { citations: EXAMPLE_CITATIONS },
+      data: { sources: EXAMPLE_CITATIONS },
     });
 
     // 3. 文字串流（text-start → text-delta(s) → text-end）
@@ -98,16 +99,16 @@ console.log("=== Vercel AI SDK UI Message Stream wire bytes ===");
 console.log(wireBytes);
 console.log("=== end ===");
 
-// ---------- 寫入 golden JSONL 檔案 ----------
+// ---------- 寫入協定參考樣本（NOT 後端 golden）----------
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const outputPath = join(__dirname, "../../infra/golden/ai_stream_golden.jsonl");
+const outputPath = join(__dirname, "../../infra/golden/ai_stream_wire_sample.json");
 
 const record = {
-  // 實際 SSE wire bytes（後端 Python emitter 應產生完全相同的格式）
+  // 真 SDK 的 SSE wire bytes（後端手刻 emitter 的 framing 應與此一致：data: <json>\n\n、data: [DONE]\n\n）
   wire: wireBytes,
-  // 產生此 golden 檔的 ai 套件版本（凍結基準）
+  // 產生此樣本的 ai 套件版本（凍結基準）
   ai_version: "6.0.197",
-  // 記錄各 chunk type 的欄位名稱，供 Phase 8 快速查閱
+  // 記錄各 chunk type 的欄位名稱，供後端 emitter 快速查閱
   schema_notes: {
     start:      "{ type: 'start', messageId?: string }",
     data_part:  "{ type: 'data-${NAME}', data: unknown, id?: string, transient?: boolean }",
@@ -121,4 +122,4 @@ const record = {
 };
 
 writeFileSync(outputPath, JSON.stringify(record) + "\n", "utf-8");
-console.log(`\n✔ golden bytes 已寫入：${outputPath}`);
+console.log(`\n✔ wire 協定樣本已寫入：${outputPath}`);
